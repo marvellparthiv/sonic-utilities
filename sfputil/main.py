@@ -17,12 +17,18 @@ import subprocess
 import click
 import sonic_platform
 import sonic_platform_base.sonic_sfp.sfputilhelper
+from sfputil.debug import debug
 from sonic_platform_base.sfp_base import SfpBase
 from swsscommon.swsscommon import SonicV2Connector, ConfigDBConnector
 from natsort import natsorted
 from sonic_py_common import device_info, logger, multi_asic
+from utilities_common import platform_sfputil_helper
+from utilities_common.platform_sfputil_helper import (
+    get_first_subport
+)
 from utilities_common.sfp_helper import covert_application_advertisement_to_output_string
 from utilities_common.sfp_helper import QSFP_DATA_MAP
+from utilities_common.sfp_helper import is_transceiver_cmis, get_data_map_sort_key
 from tabulate import tabulate
 from utilities_common.general import load_db_config
 
@@ -166,7 +172,7 @@ QSFP_DOM_CHANNEL_MONITOR_MAP = {
     'tx4power': 'TX4Power'
 }
 
-QSFP_DD_DOM_CHANNEL_MONITOR_MAP = {
+CMIS_DOM_CHANNEL_MONITOR_MAP = {
     'rx1power': 'RX1Power',
     'rx2power': 'RX2Power',
     'rx3power': 'RX3Power',
@@ -330,11 +336,12 @@ def format_dict_value_to_string(sorted_key_table,
 def convert_sfp_info_to_output_string(sfp_info_dict):
     indent = ' ' * 8
     output = ''
-    sfp_type = sfp_info_dict['type']
-    # CMIS supported module types include QSFP-DD and OSFP
-    if sfp_type.startswith('QSFP-DD') or sfp_type.startswith('OSFP'):
-        sorted_qsfp_data_map_keys = sorted(QSFP_DD_DATA_MAP, key=QSFP_DD_DATA_MAP.get)
-        for key in sorted_qsfp_data_map_keys:
+    is_sfp_cmis = is_transceiver_cmis(sfp_info_dict)
+    if is_sfp_cmis:
+        # Use the utility function with the local QSFP_DD_DATA_MAP for CMIS transceivers
+        get_sort_key = get_data_map_sort_key(sfp_info_dict, QSFP_DD_DATA_MAP)
+        sorted_qsfp_dd_info_keys = sorted(sfp_info_dict.keys(), key=get_sort_key)
+        for key in sorted_qsfp_dd_info_keys:
             if key == 'cable_type':
                 output += '{}{}: {}\n'.format(indent, sfp_info_dict['cable_type'], sfp_info_dict['cable_length'])
             elif key == 'cable_length':
@@ -350,14 +357,15 @@ def convert_sfp_info_to_output_string(sfp_info_dict):
             elif key == 'application_advertisement':
                 output += covert_application_advertisement_to_output_string(indent, sfp_info_dict)
             else:
-                try:
-                    output += '{}{}: {}\n'.format(indent, QSFP_DD_DATA_MAP[key], sfp_info_dict[key])
-                except (KeyError, ValueError) as e:
-                    output += '{}{}: N/A\n'.format(indent, QSFP_DD_DATA_MAP[key])
+                # For both known and unknown keys, use the data map display name if available
+                display_name = QSFP_DD_DATA_MAP.get(key, key)  # Use data_map name if available, otherwise use key
+                output += '{}{}: {}\n'.format(indent, display_name, sfp_info_dict.get(key, 'N/A'))
 
     else:
-        sorted_qsfp_data_map_keys = sorted(QSFP_DATA_MAP, key=QSFP_DATA_MAP.get)
-        for key in sorted_qsfp_data_map_keys:
+        # Use the utility function with QSFP_DATA_MAP for non-CMIS transceivers
+        get_sort_key = get_data_map_sort_key(sfp_info_dict, QSFP_DATA_MAP)
+        sorted_qsfp_info_keys = sorted(sfp_info_dict.keys(), key=get_sort_key)
+        for key in sorted_qsfp_info_keys:
             if key == 'cable_type':
                 output += '{}{}: {}\n'.format(indent, sfp_info_dict['cable_type'], sfp_info_dict['cable_length'])
             elif key == 'cable_length':
@@ -374,26 +382,28 @@ def convert_sfp_info_to_output_string(sfp_info_dict):
                 except ValueError as e:
                     output += '{}N/A\n'.format((indent * 2))
             else:
-                output += '{}{}: {}\n'.format(indent, QSFP_DATA_MAP[key], sfp_info_dict[key])
+                # For both known and unknown keys, use the data map display name if available
+                display_name = QSFP_DATA_MAP.get(key, key)  # Use data_map name if available, otherwise use key
+                output += '{}{}: {}\n'.format(indent, display_name, sfp_info_dict.get(key, 'N/A'))
 
     return output
 
 
 # Convert DOM sensor info in DB to CLI output string
-def convert_dom_to_output_string(sfp_type, dom_info_dict):
+def convert_dom_to_output_string(sfp_type, is_sfp_cmis, dom_info_dict):
     indent = ' ' * 8
     output_dom = ''
     channel_threshold_align = 18
     module_threshold_align = 15
 
-    if sfp_type.startswith('QSFP') or sfp_type.startswith('OSFP'):
+    if sfp_type.startswith('QSFP') or is_sfp_cmis:
         # Channel Monitor
-        if sfp_type.startswith('QSFP-DD') or sfp_type.startswith('OSFP'):
+        if is_sfp_cmis:
             output_dom += (indent + 'ChannelMonitorValues:\n')
-            sorted_key_table = natsorted(QSFP_DD_DOM_CHANNEL_MONITOR_MAP)
+            sorted_key_table = natsorted(CMIS_DOM_CHANNEL_MONITOR_MAP)
             output_channel = format_dict_value_to_string(
                 sorted_key_table, dom_info_dict,
-                QSFP_DD_DOM_CHANNEL_MONITOR_MAP,
+                CMIS_DOM_CHANNEL_MONITOR_MAP,
                 QSFP_DD_DOM_VALUE_UNIT_MAP)
             output_dom += output_channel
         else:
@@ -406,7 +416,7 @@ def convert_dom_to_output_string(sfp_type, dom_info_dict):
             output_dom += output_channel
 
         # Channel Threshold
-        if sfp_type.startswith('QSFP-DD') or sfp_type.startswith('OSFP'):
+        if is_sfp_cmis:
             dom_map = SFP_DOM_CHANNEL_THRESHOLD_MAP
         else:
             dom_map = QSFP_DOM_CHANNEL_THRESHOLD_MAP
@@ -604,6 +614,13 @@ def cli():
     if not load_port_config():
         sys.exit(ERROR_PORT_CONFIG_LOAD)
 
+    # Generic way to load platform-specific sfputil
+    # and chassis classes
+    platform_sfputil_helper.load_platform_sfputil()
+    platform_sfputil_helper.load_chassis()
+    platform_sfputil_helper.platform_sfputil_read_porttab_mappings()
+
+cli.add_command(debug)
 
 # 'show' subgroup
 @cli.group()
@@ -666,6 +683,7 @@ def eeprom(port, dump_dom, namespace):
 
                 try:
                     xcvr_info = platform_chassis.get_sfp(physical_port).get_transceiver_info()
+                    is_sfp_cmis = is_transceiver_cmis(xcvr_info)
                 except NotImplementedError:
                     click.echo("Sfp.get_transceiver_info() is currently not implemented for this platform")
                     sys.exit(ERROR_NOT_IMPLEMENTED)
@@ -683,14 +701,11 @@ def eeprom(port, dump_dom, namespace):
                         output += "API is none while getting DOM info!\n"
                         click.echo(output)
                         sys.exit(ERROR_NOT_IMPLEMENTED)
-                    else:
-                        if api.is_flat_memory():
-                            output += "DOM values not supported for flat memory module\n"
-                            continue
                     try:
-                        xcvr_dom_info = platform_chassis.get_sfp(physical_port).get_transceiver_bulk_status()
+                        xcvr_dom_info = platform_chassis.get_sfp(physical_port).get_transceiver_dom_real_value()
                     except NotImplementedError:
-                        click.echo("Sfp.get_transceiver_bulk_status() is currently not implemented for this platform")
+                        click.echo("Sfp.get_transceiver_dom_real_value() is currently not implemented "
+                                   "for this platform")
                         sys.exit(ERROR_NOT_IMPLEMENTED)
 
                     try:
@@ -701,7 +716,8 @@ def eeprom(port, dump_dom, namespace):
                         click.echo("Sfp.get_transceiver_threshold_info() is currently not implemented for this platform")
                         sys.exit(ERROR_NOT_IMPLEMENTED)
 
-                    output += convert_dom_to_output_string(xcvr_info['type'], xcvr_dom_info)
+                    output += convert_dom_to_output_string(xcvr_info['type'],
+                                                           is_sfp_cmis, xcvr_dom_info)
 
             output += '\n'
 
@@ -711,7 +727,7 @@ def eeprom(port, dump_dom, namespace):
 # 'eeprom-hexdump' subcommand
 @show.command()
 @click.option('-p', '--port', metavar='<port_name>', help="Display SFP EEPROM hexdump for port <port_name>")
-@click.option('-n', '--page', metavar='<page_number>', help="Display SFP EEEPROM hexdump for <page_number_in_hex>")
+@click.option('-n', '--page', metavar='<page_number>', help="Display SFP EEPROM hexdump for <page_number_in_hex>")
 def eeprom_hexdump(port, page):
     """Display EEPROM hexdump of SFP transceiver(s)"""
     if port:
@@ -853,20 +869,14 @@ def eeprom_hexdump_pages_general(logical_port_name, pages, target_page):
         if page == 0:
             lines.append(f'{EEPROM_DUMP_INDENT}Lower page 0h')
             return_code, output = eeprom_dump_general(physical_port, page, 0, PAGE_SIZE, 0)
-            if return_code != 0:
-                return return_code, output
             lines.append(output)
 
             lines.append(f'\n{EEPROM_DUMP_INDENT}Upper page 0h')
             return_code, output = eeprom_dump_general(physical_port, page, PAGE_OFFSET, PAGE_SIZE, PAGE_OFFSET)
-            if return_code != 0:
-                return return_code, output
             lines.append(output)
         else:
             lines.append(f'\n{EEPROM_DUMP_INDENT}Upper page {page:x}h')
             return_code, output = eeprom_dump_general(physical_port, page, page * PAGE_SIZE + PAGE_OFFSET, PAGE_SIZE, PAGE_OFFSET)
-            if return_code != 0:
-                return return_code, output
             lines.append(output)
 
     lines.append('') # add a new line
@@ -899,20 +909,14 @@ def eeprom_hexdump_pages_sff8472(logical_port_name, pages, target_page):
                 return_code, output = eeprom_dump_general(physical_port, page, 0, SFF8472_A0_SIZE, 0)
             else:
                 return_code, output = eeprom_dump_general(physical_port, page, 0, PAGE_SIZE, 0)
-            if return_code != 0:
-                return return_code, 'Error: Failed to read EEPROM for A0h!'
             lines.append(output)
         elif page == 1:
             lines.append(f'\n{EEPROM_DUMP_INDENT}A2h dump (lower 128 bytes)')
             return_code, output = eeprom_dump_general(physical_port, page, SFF8472_A0_SIZE, PAGE_SIZE, 0)
-            if return_code != 0:
-                return ERROR_NOT_IMPLEMENTED, 'Error: Failed to read EEPROM for A2h!'
             lines.append(output)
         else:
             lines.append(f'\n{EEPROM_DUMP_INDENT}A2h dump (upper 128 bytes) page {page - 2:x}h')
             return_code, output = eeprom_dump_general(physical_port, page, SFF8472_A0_SIZE + PAGE_OFFSET + page * PAGE_SIZE, PAGE_SIZE, PAGE_SIZE)
-            if return_code != 0:
-                return ERROR_NOT_IMPLEMENTED, 'Error: Failed to read EEPROM for A2h upper page!'
             lines.append(output)
 
     lines.append('') # add a new line
@@ -1070,9 +1074,9 @@ def fetch_error_status_from_state_db(port, state_db):
     """
     status = {}
     if port:
-        status[port] = state_db.get_all(state_db.STATE_DB, 'TRANSCEIVER_STATUS|{}'.format(port))
+        status[port] = state_db.get_all(state_db.STATE_DB, 'TRANSCEIVER_STATUS_SW|{}'.format(port))
     else:
-        ports = state_db.keys(state_db.STATE_DB, 'TRANSCEIVER_STATUS|*')
+        ports = state_db.keys(state_db.STATE_DB, 'TRANSCEIVER_STATUS_SW|*')
         for key in ports:
             status[key.split('|')[1]] = state_db.get_all(state_db.STATE_DB, key)
 
@@ -1165,7 +1169,11 @@ def lpmode(port):
                 port_name = get_physical_port_name(logical_port_name, i, ganged)
 
                 try:
-                    lpmode = platform_chassis.get_sfp(physical_port).get_lpmode()
+                    sfp = platform_chassis.get_sfp(physical_port)
+                    if not sfp.get_presence():
+                        output_table.append([port_name, "Not Present"])
+                        continue
+                    lpmode = sfp.get_lpmode()
                 except NotImplementedError:
                     click.echo("This functionality is currently not implemented for this platform")
                     sys.exit(ERROR_NOT_IMPLEMENTED)
@@ -1245,12 +1253,15 @@ def set_lpmode(logical_port, enable):
         ganged = True
 
     for physical_port in physical_port_list:
-        click.echo("{} low-power mode for port {} ... ".format(
-            "Enabling" if enable else "Disabling",
-            get_physical_port_name(logical_port, i, ganged)), nl=False)
-
         try:
-            result = platform_chassis.get_sfp(physical_port).set_lpmode(enable)
+            sfp = platform_chassis.get_sfp(physical_port)
+            if not sfp.get_presence():
+                click.echo(f"{logical_port}: module {physical_port} is not present, skipping")
+                continue
+            click.echo("{} low-power mode for port {} ... ".format(
+                "Enabling" if enable else "Disabling",
+                get_physical_port_name(logical_port, i, ganged)), nl=False)
+            result = sfp.set_lpmode(enable)
         except NotImplementedError:
             click.echo("This functionality is currently not implemented for this platform")
             sys.exit(ERROR_NOT_IMPLEMENTED)
@@ -1305,10 +1316,13 @@ def reset(port_name):
         ganged = True
 
     for physical_port in physical_port_list:
-        click.echo("Resetting port {} ... ".format(get_physical_port_name(port_name, i, ganged)), nl=False)
-
         try:
-            result = platform_chassis.get_sfp(physical_port).reset()
+            sfp = platform_chassis.get_sfp(physical_port)
+            if not sfp.get_presence():
+                click.echo(f"{port_name}: module {physical_port} is not present, skipping")
+                continue
+            click.echo("Resetting port {} ... ".format(get_physical_port_name(port_name, i, ganged)), nl=False)
+            result = sfp.reset()
         except NotImplementedError:
             click.echo("This functionality is currently not implemented for this platform")
             sys.exit(ERROR_NOT_IMPLEMENTED)
@@ -1377,7 +1391,11 @@ def enable(port_name):
 
 
 def update_firmware_info_to_state_db(port_name):
-    physical_port = logical_port_to_physical_port_index(port_name)
+    first_subport = get_first_subport(port_name)
+    if first_subport is None:
+        click.echo("Error: Unable to get first subport for {} while updating FW info to DB".format(port_name))
+        return
+    physical_port = logical_port_to_physical_port_index(first_subport)
 
     namespaces = multi_asic.get_front_end_namespaces()
     for namespace in namespaces:
@@ -1387,7 +1405,7 @@ def update_firmware_info_to_state_db(port_name):
             transceiver_firmware_info_dict = platform_chassis.get_sfp(physical_port).get_transceiver_info_firmware_versions()
             if transceiver_firmware_info_dict is not None:
                 for key, value in transceiver_firmware_info_dict.items():
-                    state_db.set(state_db.STATE_DB, 'TRANSCEIVER_FIRMWARE_INFO|{}'.format(port_name), key, value)
+                    state_db.set(state_db.STATE_DB, 'TRANSCEIVER_FIRMWARE_INFO|{}'.format(first_subport), key, value)
 
 # 'firmware' subgroup
 @cli.group()
@@ -1591,7 +1609,9 @@ def download_firmware(port_name, filepath):
                                                                1 = Hitless Reset to Inactive Image (Default)\n \
                                                                2 = Attempt non-hitless Reset to Running Image\n \
                                                                3 = Attempt Hitless Reset to Running Image\n")
-def run(port_name, mode):
+@click.option('--delay', metavar='<delay>', type=click.IntRange(0, 10), default=5,
+              help="Delay time before updating firmware information to STATE_DB")
+def run(port_name, mode, delay):
     """Run the firmware with default mode=0"""
 
     if is_port_type_rj45(port_name):
@@ -1606,6 +1626,11 @@ def run(port_name, mode):
     if status != 1:
         click.echo('Failed to run firmware in mode={}! CDB status: {}'.format(mode, status))
         sys.exit(EXIT_FAIL)
+
+    # The cable firmware can be still under initialization immediately after run_firmware
+    # We put a delay here to avoid potential error message in accessing the cable EEPROM
+    if delay:
+        time.sleep(delay)
 
     update_firmware_info_to_state_db(port_name)
     click.echo("Firmware run in mode={} success".format(mode))
@@ -1956,117 +1981,6 @@ def get_overall_offset_sff8472(api, page, offset, size, wire_addr):
         if size + offset - 1 > MAX_OFFSET_FOR_A2H:
             raise ValueError(f'Invalid size {size} for wire address {wire_addr}, valid range: [1, {255 - offset + 1}]')
         return page * PAGE_SIZE + offset + PAGE_SIZE_FOR_A0H
-
-
-# 'debug' subgroup
-@cli.group()
-def debug():
-    """Module debug and diagnostic control"""
-    pass
-
-
-# 'loopback' subcommand
-@debug.command()
-@click.argument('port_name', required=True)
-@click.argument('loopback_mode', required=True,
-                type=click.Choice(["host-side-input", "host-side-output",
-                                   "media-side-input", "media-side-output"]))
-@click.argument('enable', required=True, type=click.Choice(["enable", "disable"]))
-def loopback(port_name, loopback_mode, enable):
-    """Set module diagnostic loopback mode
-    """
-    physical_port = logical_port_to_physical_port_index(port_name)
-    sfp = platform_chassis.get_sfp(physical_port)
-
-    if is_port_type_rj45(port_name):
-        click.echo("{}: This functionality is not applicable for RJ45 port".format(port_name))
-        sys.exit(EXIT_FAIL)
-
-    if not is_sfp_present(port_name):
-        click.echo("{}: SFP EEPROM not detected".format(port_name))
-        sys.exit(EXIT_FAIL)
-
-    try:
-        api = sfp.get_xcvr_api()
-    except NotImplementedError:
-        click.echo("{}: This functionality is not implemented".format(port_name))
-        sys.exit(ERROR_NOT_IMPLEMENTED)
-
-    namespace = multi_asic.get_namespace_for_port(port_name)
-    config_db = ConfigDBConnector(use_unix_socket_path=True, namespace=namespace)
-    if config_db is not None:
-        config_db.connect()
-        try:
-            subport = int(config_db.get(config_db.CONFIG_DB, f'PORT|{port_name}', 'subport'))
-        except TypeError:
-            click.echo(f"{port_name}: subport is not present in CONFIG_DB")
-            sys.exit(EXIT_FAIL)
-
-        # If subport is set to 0, assign a default value of 1 to ensure valid subport configuration
-        if subport == 0:
-            subport = 1
-    else:
-        click.echo(f"{port_name}: Failed to connect to CONFIG_DB")
-        sys.exit(EXIT_FAIL)
-
-    state_db = SonicV2Connector(use_unix_socket_path=False, namespace=namespace)
-    if state_db is not None:
-        state_db.connect(state_db.STATE_DB)
-        try:
-            host_lane_count = int(state_db.get(state_db.STATE_DB,
-                                               f'TRANSCEIVER_INFO|{port_name}',
-                                               'host_lane_count'))
-        except TypeError:
-            click.echo(f"{port_name}: host_lane_count is not present in STATE_DB")
-            sys.exit(EXIT_FAIL)
-
-        try:
-            media_lane_count = int(state_db.get(state_db.STATE_DB,
-                                                f'TRANSCEIVER_INFO|{port_name}',
-                                                'media_lane_count'))
-        except TypeError:
-            click.echo(f"{port_name}: media_lane_count is not present in STATE_DB")
-            sys.exit(EXIT_FAIL)
-    else:
-        click.echo(f"{port_name}: Failed to connect to STATE_DB")
-        sys.exit(EXIT_FAIL)
-
-    if 'host-side' in loopback_mode:
-        lane_mask = get_subport_lane_mask(subport, host_lane_count)
-    elif 'media-side' in loopback_mode:
-        lane_mask = get_subport_lane_mask(subport, media_lane_count)
-    else:
-        lane_mask = 0
-
-    try:
-        status = api.set_loopback_mode(loopback_mode,
-                                       lane_mask=lane_mask,
-                                       enable=enable == 'enable')
-    except AttributeError:
-        click.echo("{}: Set loopback mode is not applicable for this module".format(port_name))
-        sys.exit(ERROR_NOT_IMPLEMENTED)
-    except TypeError:
-        click.echo("{}: Set loopback mode failed. Parameter is not supported".format(port_name))
-        sys.exit(EXIT_FAIL)
-
-    if status:
-        click.echo("{}: {} {} loopback".format(port_name, enable, loopback_mode))
-    else:
-        click.echo("{}: {} {} loopback failed".format(port_name, enable, loopback_mode))
-        sys.exit(EXIT_FAIL)
-
-
-def get_subport_lane_mask(subport, lane_count):
-    """Get the lane mask for the given subport and lane count
-
-    Args:
-        subport (int): Subport number
-        lane_count (int): Lane count for the subport
-
-    Returns:
-        int: Lane mask for the given subport and lane count
-    """
-    return ((1 << lane_count) - 1) << ((subport - 1) * lane_count)
 
 
 if __name__ == '__main__':

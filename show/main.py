@@ -15,6 +15,7 @@ from sonic_py_common import device_info
 from swsscommon.swsscommon import SonicV2Connector, ConfigDBConnector
 from tabulate import tabulate
 from utilities_common import util_base
+from utilities_common import hft as hft_common
 from utilities_common.db import Db
 from datetime import datetime
 import utilities_common.constants as constants
@@ -33,7 +34,6 @@ try:
     if os.environ["UTILITIES_UNIT_TESTING_TOPOLOGY"] == "multi_asic":
         import mock_tables.mock_multi_asic
         reload(mock_tables.mock_multi_asic)
-        reload(mock_tables.dbconnector)
         mock_tables.dbconnector.load_namespace_config()
 
 except KeyError:
@@ -47,6 +47,7 @@ from . import fabric
 from . import feature
 from . import fgnhg
 from . import flow_counters
+from . import hft
 from . import gearbox
 from . import interfaces
 from . import kdump
@@ -67,6 +68,11 @@ from . import plugins
 from . import syslog
 from . import dns
 from . import bgp_cli
+from . import stp
+from . import srv6
+from . import switch
+from . import icmp
+from . import copp
 
 # Global Variables
 PLATFORM_JSON = 'platform.json'
@@ -81,11 +87,11 @@ GEARBOX_TABLE_PHY_PATTERN = r"_GEARBOX_TABLE:phy:*"
 COMMAND_TIMEOUT = 300
 
 # To be enhanced. Routing-stack information should be collected from a global
-# location (configdb?), so that we prevent the continous execution of this
+# location (configdb?), so that we prevent the continuous execution of this
 # bash oneliner. To be revisited once routing-stack info is tracked somewhere.
 def get_routing_stack():
-    result = None
-    command = "sudo docker ps | grep bgp | awk '{print$2}' | cut -d'-' -f3 | cut -d':' -f1 | head -n 1"
+    result = 'frr'
+    command = "sudo docker ps --format '{{.Image}}\t{{.Names}}' | awk '$2 ~ /^bgp([0-9]+)?$/' | cut -d'-' -f3 | cut -d':' -f1 | head -n 1"  # noqa: E501
 
     try:
         stdout = subprocess.check_output(command, shell=True, text=True, timeout=COMMAND_TIMEOUT)
@@ -265,14 +271,17 @@ def is_gearbox_configured():
     Checks whether Gearbox is configured or not
     """
     app_db = SonicV2Connector()
-    app_db.connect(app_db.APPL_DB)
+    try:
+        app_db.connect(app_db.APPL_DB)
 
-    keys = app_db.keys(app_db.APPL_DB, '*')
+        keys = app_db.keys(app_db.APPL_DB, '*')
 
-    # If any _GEARBOX_TABLE:phy:* records present in APPL_DB, then the gearbox is configured
-    if any(re.match(GEARBOX_TABLE_PHY_PATTERN, key) for key in keys):
-        return True
-    else:
+        # If any _GEARBOX_TABLE:phy:* records present in APPL_DB, then the gearbox is configured
+        if any(re.match(GEARBOX_TABLE_PHY_PATTERN, key) for key in keys):
+            return True
+        else:
+            return False
+    except RuntimeError:
         return False
 
 CONTEXT_SETTINGS = dict(help_option_names=['-h', '--help', '-?'])
@@ -301,6 +310,8 @@ cli.add_command(feature.feature)
 cli.add_command(fgnhg.fgnhg)
 cli.add_command(flow_counters.flowcnt_route)
 cli.add_command(flow_counters.flowcnt_trap)
+if hft_common.is_supported_platform():
+    cli.add_command(hft.hft)
 cli.add_command(kdump.kdump)
 cli.add_command(interfaces.interfaces)
 cli.add_command(kdump.kdump)
@@ -318,6 +329,11 @@ cli.add_command(vxlan.vxlan)
 cli.add_command(system_health.system_health)
 cli.add_command(warm_restart.warm_restart)
 cli.add_command(dns.dns)
+cli.add_command(stp.spanning_tree)
+cli.add_command(srv6.srv6)
+cli.add_command(switch.switch)
+cli.add_command(icmp.icmp)
+cli.add_command(copp.copp)
 
 # syslog module
 cli.add_command(syslog.syslog)
@@ -405,8 +421,9 @@ def event_counters():
 @cli.command()
 @click.argument('ipaddress', required=False)
 @click.option('-if', '--iface')
+@multi_asic_util.multi_asic_click_options
 @click.option('--verbose', is_flag=True, help="Enable verbose output")
-def arp(ipaddress, iface, verbose):
+def arp(ipaddress, iface, namespace, display, verbose):
     """Show IP ARP table"""
     cmd = ['nbrshow', '-4']
 
@@ -421,6 +438,11 @@ def arp(ipaddress, iface, verbose):
 
         cmd += ['-if', str(iface)]
 
+    if namespace is not None:
+        cmd += ['-n', str(namespace)]
+
+    cmd += ['-d', str(display)]
+
     run_command(cmd, display_cmd=verbose)
 
 #
@@ -430,8 +452,9 @@ def arp(ipaddress, iface, verbose):
 @cli.command()
 @click.argument('ip6address', required=False)
 @click.option('-if', '--iface')
+@multi_asic_util.multi_asic_click_options
 @click.option('--verbose', is_flag=True, help="Enable verbose output")
-def ndp(ip6address, iface, verbose):
+def ndp(ip6address, iface, namespace, display, verbose):
     """Show IPv6 Neighbour table"""
     cmd = ['nbrshow', '-6']
 
@@ -440,6 +463,11 @@ def ndp(ip6address, iface, verbose):
 
     if iface is not None:
         cmd += ['-if', str(iface)]
+
+    if namespace is not None:
+        cmd += ['-n', str(namespace)]
+
+    cmd += ['-d', str(display)]
 
     run_command(cmd, display_cmd=verbose)
 
@@ -494,9 +522,12 @@ def storm_control(ctx, namespace, display):
 
 @storm_control.command('interface')
 @click.argument('interface', metavar='<interface>',required=True)
-def interface(interface, namespace, display):
+@click.pass_context
+def interface(ctx, interface):
+    # Get namespace from parent context
+    namespace = ctx.parent.params.get('namespace')
+
     if multi_asic.is_multi_asic() and namespace not in multi_asic.get_namespace_list():
-        ctx = click.get_current_context()
         ctx.fail('-n/--namespace option required. provide namespace from list {}'.format(multi_asic.get_namespace_list()))
     if interface:
         display_storm_interface(interface)
@@ -524,7 +555,7 @@ def mgmt_vrf(ctx,routes):
             run_command(cmd)
         else:
             click.echo("\nRoutes in Management VRF Routing Table:")
-            cmd = ['ip', 'route', 'show', 'table', '5000']
+            cmd = ['ip', 'route', 'show', 'table', '6000']
             run_command(cmd)
 
 #
@@ -605,8 +636,9 @@ def subinterfaces():
 # 'subinterfaces' subcommand ("show subinterfaces status")
 @subinterfaces.command()
 @click.argument('subinterfacename', type=str, required=False)
+@multi_asic_util.multi_asic_click_options
 @click.option('--verbose', is_flag=True, help="Enable verbose output")
-def status(subinterfacename, verbose):
+def status(subinterfacename, namespace, display, verbose):
     """Show sub port interface status information"""
     cmd = ['intfutil', '-c', 'status']
 
@@ -622,6 +654,12 @@ def status(subinterfacename, verbose):
         cmd += ['-i', str(subinterfacename)]
     else:
         cmd += ['-i', 'subport']
+
+    if multi_asic.is_multi_asic():
+        cmd += ['-d', str(display)]
+    if namespace is not None:
+        cmd += ['-n', str(namespace)]
+
     run_command(cmd, display_cmd=verbose)
 
 #
@@ -636,13 +674,16 @@ def pfc():
 # 'counters' subcommand ("show interfaces pfccounters")
 @pfc.command()
 @multi_asic_util.multi_asic_click_options
+@click.option('--history', is_flag=True, help="Display historical PFC statistics")
 @click.option('--verbose', is_flag=True, help="Enable verbose output")
-def counters(namespace, display, verbose):
+def counters(namespace, history, display, verbose):
     """Show pfc counters"""
 
     cmd = ['pfcstat', '-s', str(display)]
     if namespace is not None:
         cmd += ['-n', str(namespace)]
+    if history:
+        cmd += ['--history']
 
     run_command(cmd, display_cmd=verbose)
 
@@ -738,18 +779,63 @@ def queue():
     """Show details of the queues """
     pass
 
+
 # 'counters' subcommand ("show queue counters")
+@queue.command()
+@click.argument('interfacename', metavar='[INTERFACE_NAME]', required=False)
+@multi_asic_util.multi_asic_click_options
+@click.option('-a', '--all', is_flag=True, help="All counters")
+@click.option('-T', '--trim', is_flag=True, help="Trimming counters")
+@click.option('-V', '--voq', is_flag=True, help="VOQ counters")
+@click.option('-nz', '--nonzero', is_flag=True, help="Non Zero Counters")
+@click.option('-j', '--json', is_flag=True, help="JSON output")
+@click.option('--verbose', is_flag=True, help="Enable verbose output")
+def counters(interfacename, namespace, display, all, trim, voq, nonzero, json, verbose):  # noqa: F811
+    """Show queue counters"""
+
+    cmd = ["queuestat"]
+
+    if interfacename is not None:
+        if clicommon.get_interface_naming_mode() == "alias":
+            interfacename = iface_alias_converter.alias_to_name(interfacename)
+
+    if interfacename is not None:
+        cmd += ['-p', str(interfacename)]
+
+    if namespace is not None:
+        cmd += ['-n', str(namespace)]
+
+    if all:
+        cmd += ["-a"]
+
+    if trim:
+        cmd += ["-T"]
+
+    if voq:
+        cmd += ["-V"]
+
+    if nonzero:
+        cmd += ["-nz"]
+
+    if json:
+        cmd += ["-j"]
+
+    run_command(cmd, display_cmd=verbose)
+
+
+# 'wredcounters' subcommand ("show queue wredcounters")
 @queue.command()
 @click.argument('interfacename', required=False)
 @multi_asic_util.multi_asic_click_options
 @click.option('--verbose', is_flag=True, help="Enable verbose output")
 @click.option('--json', is_flag=True, help="JSON output")
 @click.option('--voq', is_flag=True, help="VOQ counters")
-@click.option('--nonzero', is_flag=True, help="Non Zero Counters")
-def counters(interfacename, namespace, display, verbose, json, voq, nonzero):
-    """Show queue counters"""
+@click.option('-nz', '--nonzero', is_flag=True, help="Non Zero Counters")
+@click.option('--summary', is_flag=True, help="Summary counters")
+def wredcounters(interfacename, namespace, display, verbose, json, voq, nonzero, summary):
+    """Show queue wredcounters"""
 
-    cmd = ["queuestat"]
+    cmd = ["wredstat"]
 
     if interfacename is not None:
         if clicommon.get_interface_naming_mode() == "alias":
@@ -769,6 +855,9 @@ def counters(interfacename, namespace, display, verbose, json, voq, nonzero):
 
     if nonzero:
         cmd += ["-nz"]
+
+    if summary:
+        cmd += ["-s"]
 
     run_command(cmd, display_cmd=verbose)
 
@@ -791,11 +880,14 @@ def watermark():
               show_default=True,
               help='Namespace name or all',
               callback=multi_asic_util.multi_asic_namespace_validation_callback)
-def wm_q_uni(namespace):
+@click.option('--json', '-j', 'json_output', is_flag=True, default=False, show_default=True, help="Display JSON output")
+def wm_q_uni(namespace, json_output):
     """Show user WM for unicast queues"""
     command = ['watermarkstat', '-t', 'q_shared_uni']
     if namespace is not None:
         command += ['-n', str(namespace)]
+    if json_output:
+        command += ["-j"]
     run_command(command)
 
 # 'multicast' subcommand ("show queue watermarks multicast")
@@ -808,11 +900,14 @@ def wm_q_uni(namespace):
               show_default=True,
               help='Namespace name or all',
               callback=multi_asic_util.multi_asic_namespace_validation_callback)
-def wm_q_multi(namespace):
+@click.option('--json', '-j', 'json_output', is_flag=True, default=False, show_default=True, help="Display JSON output")
+def wm_q_multi(namespace, json_output):
     """Show user WM for multicast queues"""
     command = ['watermarkstat', '-t', 'q_shared_multi']
     if namespace is not None:
         command += ['-n', str(namespace)]
+    if json_output:
+        command += ["-j"]
     run_command(command)
 
 # 'all' subcommand ("show queue watermarks all")
@@ -825,11 +920,14 @@ def wm_q_multi(namespace):
               show_default=True,
               help='Namespace name or all',
               callback=multi_asic_util.multi_asic_namespace_validation_callback)
-def wm_q_all(namespace):
+@click.option('--json', '-j', 'json_output', is_flag=True, default=False, show_default=True, help="Display JSON output")
+def wm_q_all(namespace, json_output):
     """Show user WM for all queues"""
     command = ['watermarkstat', '-t', 'q_shared_all']
     if namespace is not None:
         command += ['-n', str(namespace)]
+    if json_output:
+        command += ["-j"]
     run_command(command)
 
 #
@@ -851,11 +949,14 @@ def persistent_watermark():
               show_default=True,
               help='Namespace name or all',
               callback=multi_asic_util.multi_asic_namespace_validation_callback)
-def pwm_q_uni(namespace):
+@click.option('--json', '-j', 'json_output', is_flag=True, default=False, show_default=True, help="Display JSON output")
+def pwm_q_uni(namespace, json_output):
     """Show persistent WM for unicast queues"""
     command = ['watermarkstat', '-p', '-t', 'q_shared_uni']
     if namespace is not None:
         command += ['-n', str(namespace)]
+    if json_output:
+        command += ["-j"]
     run_command(command)
 
 # 'multicast' subcommand ("show queue persistent-watermarks multicast")
@@ -868,11 +969,14 @@ def pwm_q_uni(namespace):
               show_default=True,
               help='Namespace name or all',
               callback=multi_asic_util.multi_asic_namespace_validation_callback)
-def pwm_q_multi(namespace):
+@click.option('--json', '-j', 'json_output', is_flag=True, default=False, show_default=True, help="Display JSON output")
+def pwm_q_multi(namespace, json_output):
     """Show persistent WM for multicast queues"""
     command = ['watermarkstat', '-p', '-t', 'q_shared_multi']
     if namespace is not None:
         command += ['-n', str(namespace)]
+    if json_output:
+        command += ["-j"]
     run_command(command)
 
 # 'all' subcommand ("show queue persistent-watermarks all")
@@ -885,11 +989,14 @@ def pwm_q_multi(namespace):
               show_default=True,
               help='Namespace name or all',
               callback=multi_asic_util.multi_asic_namespace_validation_callback)
-def pwm_q_all(namespace):
+@click.option('--json', '-j', 'json_output', is_flag=True, default=False, show_default=True, help="Display JSON output")
+def pwm_q_all(namespace, json_output):
     """Show persistent WM for all queues"""
     command = ['watermarkstat', '-p', '-t', 'q_shared_all']
     if namespace is not None:
         command += ['-n', str(namespace)]
+    if json_output:
+        command += ["-j"]
     run_command(command)
 
 #
@@ -914,11 +1021,14 @@ def watermark():
               show_default=True,
               help='Namespace name or all',
               callback=multi_asic_util.multi_asic_namespace_validation_callback)
-def wm_pg_headroom(namespace):
+@click.option('--json', '-j', 'json_output', is_flag=True, default=False, show_default=True, help="Display JSON output")
+def wm_pg_headroom(namespace, json_output):
     """Show user headroom WM for pg"""
     command = ['watermarkstat', '-t', 'pg_headroom']
     if namespace is not None:
         command += ['-n', str(namespace)]
+    if json_output:
+        command += ["-j"]
     run_command(command)
 
 @watermark.command('shared')
@@ -930,11 +1040,14 @@ def wm_pg_headroom(namespace):
               show_default=True,
               help='Namespace name or all',
               callback=multi_asic_util.multi_asic_namespace_validation_callback)
-def wm_pg_shared(namespace):
+@click.option('--json', '-j', 'json_output', is_flag=True, default=False, show_default=True, help="Display JSON output")
+def wm_pg_shared(namespace, json_output):
     """Show user shared WM for pg"""
     command = ['watermarkstat', '-t', 'pg_shared']
     if namespace is not None:
         command += ['-n', str(namespace)]
+    if json_output:
+        command += ["-j"]
     run_command(command)
 
 @priority_group.group()
@@ -965,11 +1078,14 @@ def persistent_watermark():
               show_default=True,
               help='Namespace name or all',
               callback=multi_asic_util.multi_asic_namespace_validation_callback)
-def pwm_pg_headroom(namespace):
+@click.option('--json', '-j', 'json_output', is_flag=True, default=False, show_default=True, help="Display JSON output")
+def pwm_pg_headroom(namespace, json_output):
     """Show persistent headroom WM for pg"""
     command = ['watermarkstat', '-p', '-t', 'pg_headroom']
     if namespace is not None:
         command += ['-n', str(namespace)]
+    if json_output:
+        command += ["-j"]
     run_command(command)
 
 
@@ -982,11 +1098,14 @@ def pwm_pg_headroom(namespace):
               show_default=True,
               help='Namespace name or all',
               callback=multi_asic_util.multi_asic_namespace_validation_callback)
-def pwm_pg_shared(namespace):
+@click.option('--json', '-j', 'json_output', is_flag=True, default=False, show_default=True, help="Display JSON output")
+def pwm_pg_shared(namespace, json_output):
     """Show persistent shared WM for pg"""
     command = ['watermarkstat', '-p', '-t', 'pg_shared']
     if namespace is not None:
         command += ['-n', str(namespace)]
+    if json_output:
+        command += ["-j"]
     run_command(command)
 
 
@@ -1086,7 +1205,15 @@ def pwm_headroom_pool(namespace):
 @click.option('-t', '--type')
 @click.option('-c', '--count', is_flag=True)
 @click.option('--verbose', is_flag=True, help="Enable verbose output")
-def mac(ctx, vlan, port, address, type, count, verbose):
+@click.option('-n',
+              '--namespace',
+              'namespace',
+              default=None,
+              type=str,
+              show_default=True,
+              help='Namespace name or all',
+              callback=multi_asic_util.multi_asic_namespace_validation_callback)
+def mac(ctx, vlan, port, address, type, count, verbose, namespace):
     """Show MAC (FDB) entries"""
 
     if ctx.invoked_subcommand is not None:
@@ -1108,6 +1235,9 @@ def mac(ctx, vlan, port, address, type, count, verbose):
 
     if count:
         cmd += ["-c"]
+
+    if namespace is not None:
+        cmd += ['-n', str(namespace)]
 
     run_command(cmd, display_cmd=verbose)
 
@@ -1142,6 +1272,111 @@ def route_map(route_map_name, verbose):
     if route_map_name is not None:
         cmd[-1] += ' {}'.format(route_map_name)
     run_command(cmd, display_cmd=verbose)
+
+
+#
+# 'vrrp' group ("show vrrp ...")
+#
+@cli.group(cls=clicommon.AliasedGroup, invoke_without_command="true")
+@click.pass_context
+@click.option('--verbose', is_flag=True, help="Enable verbose output")
+def vrrp(ctx, verbose):
+    """Show vrrp commands"""
+    if ctx.invoked_subcommand is not None:
+        return
+
+    cmd = ['sudo', constants.RVTYSH_COMMAND, '-c', 'show vrrp']
+    run_command(cmd, display_cmd=verbose)
+
+
+# 'interface' command
+@vrrp.command('interface')
+@click.pass_context
+@click.argument('interface_name', metavar='<interface_name>', required=True)
+@click.argument('vrid', metavar='<vrid>', required=False)
+@click.option('--verbose', is_flag=True, help="Enable verbose output")
+def vrrp_interface(ctx, interface_name, vrid, verbose):
+    """show vrrp interface <interface_name> <vrid>"""
+    cmd = ['sudo', constants.RVTYSH_COMMAND, '-c', 'show vrrp']
+    if vrid is not None:
+        cmd[-1] += ' interface {} {}'.format(interface_name, vrid)
+    else:
+        cmd[-1] += ' interface {}'.format(interface_name)
+    run_command(cmd, display_cmd=verbose)
+
+
+# 'vrid' command
+@vrrp.command('vrid')
+@click.pass_context
+@click.argument('vrid', metavar='<vrid>', required=True)
+@click.option('--verbose', is_flag=True, help="Enable verbose output")
+def vrrp_vrid(ctx, vrid, verbose):
+    """show vrrp vrid <vrid>"""
+    cmd = ['sudo', constants.RVTYSH_COMMAND, '-c', 'show vrrp {}'.format(vrid)]
+    run_command(cmd, display_cmd=verbose)
+
+
+# 'summary' command
+@vrrp.command('summary')
+@click.pass_context
+@click.option('--verbose', is_flag=True, help="Enable verbose output")
+def vrrp_summary(ctx, verbose):
+    """show vrrp summary"""
+    cmd = ['sudo', constants.RVTYSH_COMMAND, '-c', 'show vrrp summary']
+    run_command(cmd, display_cmd=verbose)
+
+
+#
+# 'vrrp6' group ("show vrrp6 ...")
+#
+@cli.group(cls=clicommon.AliasedGroup, invoke_without_command="true")
+@click.pass_context
+@click.option('--verbose', is_flag=True, help="Enable verbose output")
+def vrrp6(ctx, verbose):
+    """Show vrrp6 commands"""
+    if ctx.invoked_subcommand is not None:
+        return
+
+    cmd = ['sudo', constants.RVTYSH_COMMAND, '-c', 'show vrrp6']
+    run_command(cmd, display_cmd=verbose)
+
+
+# 'interface' command
+@vrrp6.command('interface')
+@click.pass_context
+@click.argument('interface_name', metavar='<interface_name>', required=True)
+@click.argument('vrid', metavar='<vrid>', required=False)
+@click.option('--verbose', is_flag=True, help="Enable verbose output")
+def vrrp6_interface(ctx, interface_name, vrid, verbose):
+    """show vrrp6 interface <interface_name> <vrid>"""
+    cmd = ['sudo', constants.RVTYSH_COMMAND, '-c', 'show vrrp6']
+    if vrid is not None:
+        cmd[-1] += ' interface {} {}'.format(interface_name, vrid)
+    else:
+        cmd[-1] += ' interface {}'.format(interface_name)
+    run_command(cmd, display_cmd=verbose)
+
+
+# 'vrid' command
+@vrrp6.command('vrid')
+@click.pass_context
+@click.argument('vrid', metavar='<vrid>', required=True)
+@click.option('--verbose', is_flag=True, help="Enable verbose output")
+def vrrp6_vrid(ctx, vrid, verbose):
+    """show vrrp6 vrid <vrid>"""
+    cmd = ['sudo', constants.RVTYSH_COMMAND, '-c', 'show vrrp6 {}'.format(vrid)]
+    run_command(cmd, display_cmd=verbose)
+
+
+# 'summary' command
+@vrrp6.command('summary')
+@click.pass_context
+@click.option('--verbose', is_flag=True, help="Enable verbose output")
+def vrrp6_summary(ctx, verbose):
+    """show vrrp6 summary"""
+    cmd = ['sudo', constants.RVTYSH_COMMAND, '-c', 'show vrrp6 summary']
+    run_command(cmd, display_cmd=verbose)
+
 
 #
 # 'ip' group ("show ip ...")
@@ -1349,41 +1584,47 @@ elif device_info.is_supervisor():
 #
 
 @ipv6.command('link-local-mode')
+@multi_asic_util.multi_asic_click_option_namespace
 @click.option('--verbose', is_flag=True, help="Enable verbose output")
-def link_local_mode(verbose):
+def link_local_mode(namespace, verbose):
     """show ipv6 link-local-mode"""
     header = ['Interface Name', 'Mode']
     body = []
     tables = ['PORT', 'PORTCHANNEL', 'VLAN']
-    config_db = ConfigDBConnector()
-    config_db.connect()
-    interface = ""
 
-    for table in tables:
-        if table == "PORT":
-            interface = "INTERFACE"
-        elif table == "PORTCHANNEL":
-            interface = "PORTCHANNEL_INTERFACE"
-        elif table == "VLAN":
-            interface = "VLAN_INTERFACE"
+    masic = multi_asic_util.MultiAsic(namespace_option=namespace)
+    ns_list = masic.get_ns_list_based_on_options()
 
-        port_dict = config_db.get_table(table)
-        interface_dict = config_db.get_table(interface)
-        link_local_data = {}
+    for ns in ns_list:
+        config_db = ConfigDBConnector(namespace=ns)
+        config_db.connect()
+        interface = ""
 
-        for port in port_dict.keys():
-            if port not in interface_dict:
-                body.append([port, 'Disabled'])
-            elif interface_dict:
-                value = interface_dict[port]
-                if 'ipv6_use_link_local_only' in value:
-                    link_local_data[port] = interface_dict[port]['ipv6_use_link_local_only']
-                    if link_local_data[port] == 'enable':
-                        body.append([port, 'Enabled'])
+        for table in tables:
+            if table == "PORT":
+                interface = "INTERFACE"
+            elif table == "PORTCHANNEL":
+                interface = "PORTCHANNEL_INTERFACE"
+            elif table == "VLAN":
+                interface = "VLAN_INTERFACE"
+
+            port_dict = config_db.get_table(table)
+            interface_dict = config_db.get_table(interface)
+            link_local_data = {}
+
+            for port in port_dict.keys():
+                if port not in interface_dict:
+                    body.append([port, 'Disabled'])
+                elif interface_dict:
+                    value = interface_dict[port]
+                    if 'ipv6_use_link_local_only' in value:
+                        link_local_data[port] = interface_dict[port]['ipv6_use_link_local_only']
+                        if link_local_data[port] == 'enable':
+                            body.append([port, 'Enabled'])
+                        else:
+                            body.append([port, 'Disabled'])
                     else:
                         body.append([port, 'Disabled'])
-                else:
-                    body.append([port, 'Disabled'])
 
     click.echo(tabulate(body, header, tablefmt="grid"))
 
@@ -1471,8 +1712,8 @@ def logging(process, lines, follow, verbose):
 #
 
 @cli.command()
-@click.option("--verbose", is_flag=True, help="Enable verbose output")
-def version(verbose):
+@click.option("--brief", is_flag=True, help="Brief output, omit docker image information")
+def version(brief):
     """Show version information"""
     version_info = device_info.get_sonic_version_info()
     platform_info = device_info.get_platform_info()
@@ -1483,10 +1724,10 @@ def version(verbose):
 
     sys_date = datetime.now()
 
-    click.echo("\nSONiC Software Version: SONiC.{}".format(version_info['build_version']))
-    click.echo("SONiC OS Version: {}".format(version_info['sonic_os_version']))
-    click.echo("Distribution: Debian {}".format(version_info['debian_version']))
-    click.echo("Kernel: {}".format(version_info['kernel_version']))
+    click.echo("\nSONiC Software Version: SONiC.{}".format(version_info.get('build_version', 'N/A')))
+    click.echo("SONiC OS Version: {}".format(version_info.get('sonic_os_version', 'N/A')))
+    click.echo("Distribution: Debian {}".format(version_info.get('debian_version', 'N/A')))
+    click.echo("Kernel: {}".format(version_info.get('kernel_version', os.uname().release)))
     click.echo("Build commit: {}".format(version_info['commit_id']))
     click.echo("Build date: {}".format(version_info['build_date']))
     click.echo("Built by: {}".format(version_info['built_by']))
@@ -1499,10 +1740,12 @@ def version(verbose):
     click.echo("Hardware Revision: {}".format(chassis_info['revision']))
     click.echo("Uptime: {}".format(sys_uptime.stdout.read().strip()))
     click.echo("Date: {}".format(sys_date.strftime("%a %d %b %Y %X")))
-    click.echo("\nDocker images:")
-    cmd = ['sudo', 'docker', 'images', '--format', "table {{.Repository}}\\t{{.Tag}}\\t{{.ID}}\\t{{.Size}}"]
-    p = subprocess.Popen(cmd, text=True, stdout=subprocess.PIPE)
-    click.echo(p.stdout.read())
+
+    if not brief:
+        click.echo("\nDocker images:")
+        cmd = ['sudo', 'docker', 'images', '--format', "table {{.Repository}}\\t{{.Tag}}\\t{{.ID}}\\t{{.Size}}"]
+        p = subprocess.Popen(cmd, text=True, stdout=subprocess.PIPE)
+        click.echo(p.stdout.read())
 
 #
 # 'environment' command ("show environment")
@@ -1688,7 +1931,7 @@ def ntp(verbose):
     """Show NTP running configuration"""
     ntp_servers = []
     ntp_dict = {}
-    with open("/etc/ntpsec/ntp.conf") as ntp_file:
+    with open("/etc/chrony/chrony.conf") as ntp_file:
         data = ntp_file.readlines()
     for line in data:
         if line.startswith("server "):
@@ -1887,6 +2130,27 @@ def syslog(verbose):
     click.echo(tabulate(body, header, tablefmt="simple", stralign="left", missingval=""))
 
 
+# 'spanning-tree' subcommand ("show runningconfiguration spanning_tree")
+@runningconfiguration.command()
+@click.option('--verbose', is_flag=True, help="Enable verbose output")
+def spanning_tree(verbose):
+    """Show spanning_tree running configuration"""
+    stp_list = ["STP", "STP_PORT", "STP_VLAN", "STP_VLAN_PORT"]
+    for key in stp_list:
+        cmd = ['sudo', 'sonic-cfggen', '-d', '--var-json', key]
+        run_command(cmd, display_cmd=verbose)
+
+
+# 'copp' subcommand ("show runningconfiguration copp")
+@runningconfiguration.command()
+@click.option('--verbose', is_flag=True, help="Enable verbose output")
+def copp(verbose):
+    """Show copp running configuration"""
+    copp_list = ["COPP_GROUP", "COPP_TRAP"]
+    for key in copp_list:
+        cmd = ['sudo', 'sonic-cfggen', '-d', '--var-json', key]
+        run_command(cmd, display_cmd=verbose)
+
 #
 # 'startupconfiguration' group ("show startupconfiguration ...")
 #
@@ -1928,22 +2192,15 @@ def bgp(verbose):
 @click.option('--verbose', is_flag=True, help="Enable verbose output")
 def ntp(ctx, verbose):
     """Show NTP information"""
-    from pkg_resources import parse_version
-    ntpstat_cmd = ["ntpstat"]
-    ntpcmd = ["ntpq", "-p", "-n"]
+    chronyc_tracking_cmd = ["chronyc", "-n", "tracking"]
+    chronyc_sources_cmd = ["chronyc", "-n", "sources"]
     if is_mgmt_vrf_enabled(ctx) is True:
-        #ManagementVRF is enabled. Call ntpq using "ip vrf exec" or cgexec based on linux version
-        os_info =  os.uname()
-        release = os_info[2].split('-')
-        if parse_version(release[0]) > parse_version("4.9.0"):
-            ntpstat_cmd = ['sudo', 'ip', 'vrf', 'exec', 'mgmt', 'ntpstat']
-            ntpcmd = ['sudo', 'ip', 'vrf', 'exec', 'mgmt', 'ntpq', '-p', '-n']
-        else:
-            ntpstat_cmd = ['sudo', 'cgexec', '-g', 'l3mdev:mgmt', 'ntpstat']
-            ntpcmd = ['sudo', 'cgexec', '-g', 'l3mdev:mgmt', 'ntpq', '-p', '-n']
+        # ManagementVRF is enabled. Call chronyc using "ip vrf exec" based on linux version
+        chronyc_tracking_cmd = ["sudo", "ip", "vrf", "exec", "mgmt"] + chronyc_tracking_cmd
+        chronyc_sources_cmd = ["sudo", "ip", "vrf", "exec", "mgmt"] + chronyc_sources_cmd
 
-    run_command(ntpstat_cmd, display_cmd=verbose)
-    run_command(ntpcmd, display_cmd=verbose)
+    run_command(chronyc_tracking_cmd, display_cmd=verbose)
+    run_command(chronyc_sources_cmd, display_cmd=verbose)
 
 #
 # 'uptime' command ("show uptime")
@@ -2246,11 +2503,13 @@ def information():
 # 'line' command ("show line")
 #
 @cli.command('line')
-@click.option('--brief', '-b', metavar='<brief_mode>', required=False, is_flag=True)
+@click.option('--brief', '-b', is_flag=True,
+              help="Show information for only configured console lines")
+@click.option('--show-escape', "-e", is_flag=True, help="Show escape character for each line")
 @click.option('--verbose', is_flag=True, help="Enable verbose output")
-def line(brief, verbose):
+def line(brief, show_escape, verbose):
     """Show all console lines and their info include available ttyUSB devices unless specified brief mode"""
-    cmd = ['consutil', 'show'] + (["-b"] if brief else [])
+    cmd = ['consutil', 'show-escape' if show_escape else 'show'] + (["-b"] if brief else [])
     run_command(cmd, display_cmd=verbose)
     return
 
@@ -2303,8 +2562,8 @@ def bmp_neighbor_table(db):
                 values["peer_addr"],
                 values["peer_asn"],
                 values["peer_rd"],
-                values["peer_port"],
-                values["local_addr"],
+                values["remote_port"],
+                values["local_ip"],
                 values["local_asn"],
                 values["local_port"],
                 values["sent_cap"],
@@ -2415,25 +2674,37 @@ def bfd():
 # 'summary' subcommand ("show bfd summary")
 @bfd.command()
 @clicommon.pass_db
-def summary(db):
+@click.option('--namespace', '-n', 'namespace', default=None, type=str, show_default=True,
+              help='Namespace name or all', callback=multi_asic_util.multi_asic_namespace_validation_callback)
+def summary(db, namespace):
     """Show bfd session information"""
     bfd_headers = ["Peer Addr", "Interface", "Vrf", "State", "Type", "Local Addr",
                 "TX Interval", "RX Interval", "Multiplier", "Multihop", "Local Discriminator"]
 
-    bfd_keys = db.db.keys(db.db.STATE_DB, "BFD_SESSION_TABLE|*")
+    if namespace is None:
+        if multi_asic.is_multi_asic():
+            namespace_list = multi_asic.get_namespace_list()
+        else:
+            namespace_list = [constants.DEFAULT_NAMESPACE]
+    else:
+        namespace_list = [namespace]
 
-    click.echo("Total number of BFD sessions: {}".format(0 if bfd_keys is None else len(bfd_keys)))
-
+    total_bfd_sessions = 0
     bfd_body = []
-    if bfd_keys is not None:
+    for ns in namespace_list:
+        bfd_keys = db.db_clients[ns].keys(db.db.STATE_DB, "BFD_SESSION_TABLE|*")
+        if bfd_keys is None:
+            continue
+        total_bfd_sessions += len(bfd_keys)
         for key in bfd_keys:
             key_values = key.split('|')
-            values = db.db.get_all(db.db.STATE_DB, key)
+            values = db.db_clients[ns].get_all(db.db.STATE_DB, key)
             if "local_discriminator" not in values.keys():
                 values["local_discriminator"] = "NA"
             bfd_body.append([key_values[3], key_values[2], key_values[1], values["state"], values["type"], values["local_addr"],
                                 values["tx_interval"], values["rx_interval"], values["multiplier"], values["multihop"], values["local_discriminator"]])
 
+    click.echo("Total number of BFD sessions: {}".format(total_bfd_sessions))
     click.echo(tabulate(bfd_body, bfd_headers))
 
 
@@ -2441,13 +2712,18 @@ def summary(db):
 @bfd.command()
 @clicommon.pass_db
 @click.argument('peer_ip', required=True)
-def peer(db, peer_ip):
+@click.option('--namespace', '-n', 'namespace', default=None, type=str, show_default=True,
+              help='Namespace name or all', callback=multi_asic_util.multi_asic_namespace_validation_callback)
+def peer(db, peer_ip, namespace):
     """Show bfd session information for BFD peer"""
     bfd_headers = ["Peer Addr", "Interface", "Vrf", "State", "Type", "Local Addr",
                 "TX Interval", "RX Interval", "Multiplier", "Multihop", "Local Discriminator"]
 
-    bfd_keys = db.db.keys(db.db.STATE_DB, "BFD_SESSION_TABLE|*|{}".format(peer_ip))
-    delimiter = db.db.get_db_separator(db.db.STATE_DB)
+    if namespace is None:
+        namespace = constants.DEFAULT_NAMESPACE
+
+    bfd_keys = db.db_clients[namespace].keys(db.db.STATE_DB, "BFD_SESSION_TABLE|*|{}".format(peer_ip))
+    delimiter = db.db_clients[namespace].get_db_separator(db.db.STATE_DB)
 
     if bfd_keys is None or len(bfd_keys) == 0:
         click.echo("No BFD sessions found for peer IP {}".format(peer_ip))
@@ -2459,7 +2735,7 @@ def peer(db, peer_ip):
     if bfd_keys is not None:
         for key in bfd_keys:
             key_values = key.split(delimiter)
-            values = db.db.get_all(db.db.STATE_DB, key)
+            values = db.db_clients[namespace].get_all(db.db.STATE_DB, key)
             if "local_discriminator" not in values.keys():
                 values["local_discriminator"] = "NA"
             bfd_body.append([key_values[3], key_values[2], key_values[1], values.get("state"), values.get("type"), values.get("local_addr"),
@@ -2474,9 +2750,22 @@ def peer(db, peer_ip):
 def suppress_pending_fib(db):
     """ Show the status of suppress pending FIB feature """
 
-    field_values = db.cfgdb.get_entry('DEVICE_METADATA', 'localhost')
-    state = field_values.get('suppress-fib-pending', 'disabled').title()
-    click.echo(state)
+    if multi_asic.get_num_asics() > 1:
+        namespace_list = multi_asic.get_namespaces_from_linux()
+        masic = True
+    else:
+        namespace_list = [multi_asic.DEFAULT_NAMESPACE]
+        masic = False
+
+    for ns in namespace_list:
+        config_db = db.cfgdb_clients[ns]
+        field_values = config_db.get_entry('DEVICE_METADATA', 'localhost')
+        state = field_values.get('suppress-fib-pending', 'enabled').title()
+
+        if masic:
+            click.echo("{}: {}".format(ns, state))
+        else:
+            click.echo("{}".format(state))
 
 
 # asic-sdk-health-event subcommand ("show asic-sdk-health-event")
@@ -2634,6 +2923,28 @@ def banner(db):
 
     messages = [data]
     click.echo(tabulate(messages, headers=hdrs, tablefmt='simple', missingval=''))
+
+
+#
+# 'switch-fast-linkup' command group ("show switch-fast-linkup ...")
+#
+@cli.group(cls=clicommon.AliasedGroup, name='switch-fast-linkup', context_settings=CONTEXT_SETTINGS)
+@click.pass_context
+def switch_fast_linkup_group(ctx):
+    """Show fast link-up feature configuration (global)"""
+    pass
+
+
+@switch_fast_linkup_group.command(name='global')
+@click.option('--json', 'json_output', is_flag=True, default=False, help='JSON output')
+@clicommon.pass_db
+def show_fast_linkup_global(db, json_output):
+    data = db.cfgdb.get_entry('SWITCH_FAST_LINKUP', 'GLOBAL') or {}
+    if json_output:
+        click.echo(json.dumps(data, indent=2))
+        return
+    rows = [[k, v] for k, v in data.items()]
+    click.echo(tabulate(rows, headers=['Field', 'Value'], tablefmt='grid'))
 
 
 # Load plugins and register them

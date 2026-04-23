@@ -4,17 +4,18 @@ import sys
 import json
 import syslog
 import subprocess
+import argparse
 from swsscommon import swsscommon
 
-''' vnet_route_check.py: tool that verifies VNET routes consistancy between SONiC and vendor SDK DBs.
+''' vnet_route_check.py: tool that verifies VNET routes consistency between SONiC and vendor SDK DBs.
 
 Logically VNET route verification logic consists of 3 parts:
 1. Get VNET routes entries that are missed in ASIC_DB but present in APP_DB.
 2. Get VNET routes entries that are missed in APP_DB but present in ASIC_DB.
 3. Get VNET routes entries that are missed in SDK but present in ASIC_DB.
 
-Returns 0 if there is no inconsistancy found and all VNET routes are aligned in all DBs.
-Returns -1 if there is incosistancy found and prints differences between DBs in JSON format to standart output.
+Returns 0 if there is no inconsistency found and all VNET routes are aligned in all DBs.
+Returns -1 if there is inconsistency found and prints differences between DBs in JSON format to standard output.
 
 Format of differences output:
 {
@@ -49,7 +50,7 @@ RC_OK = 0
 RC_ERR = -1
 default_vrf_oid = ""
 
-report_level = syslog.LOG_ERR
+report_level = syslog.LOG_WARNING
 write_to_syslog = True
 
 
@@ -178,7 +179,7 @@ def filter_out_vnet_ip2me_routes(vnet_routes):
             continue
 
         # rif_attrs[0] - RIF name
-        # rif_attrs[1] - IP prefix and prefix legth
+        # rif_attrs[1] - IP prefix and prefix length
         # IP2ME routes have '/32' prefix length so replace it and add to the list
         if rif_attrs[0] in vnet_intfs:
             rif_ip, _ = rif_attrs[1].split('/')
@@ -356,23 +357,62 @@ def get_sdk_vnet_routes_diff(routes):
     return routes_diff
 
 
+def filter_active_vnet_routes(vnet_routes: dict):
+    """ Filters a dictionary containing VNet routes configured for each VNet in APP_DB.
+    For each VNet in "vnet_routes", only active routes are included in the returned dictionary.
+    Format (for both input and output):
+    { <vnet_name>: { 'routes': [ <pfx/pfx_len> ], 'vrf_oid': <oid> } }
+    """
+    state_db = swsscommon.DBConnector("STATE_DB", 0, True)
+    vnet_route_tunnel_table = swsscommon.Table(state_db, "VNET_ROUTE_TUNNEL_TABLE")
+
+    vnet_active_routes = {}
+    for vnet_name, vnet_info in vnet_routes.items():
+        active_routes = []
+        for prefix in vnet_info["routes"]:
+            key = f"{vnet_name}|{prefix}"
+            exists, fvs = vnet_route_tunnel_table.get(key)
+            if not exists:
+                print_message(syslog.LOG_WARNING, f"VNET_ROUTE_TUNNEL_TABLE|{key} does not exist in STATE DB.")
+                # Treating "prefix" as an inactive route
+                continue
+            fvs_dict = dict(fvs)
+            if fvs_dict.get("state") == "active":
+                active_routes.append(prefix)
+        if len(active_routes) > 0:
+            vnet_active_routes[vnet_name] = {"routes": active_routes, "vrf_oid": vnet_info["vrf_oid"]}
+
+    return vnet_active_routes
+
+
 def main():
+    parser = argparse.ArgumentParser(
+        description="A script that checks for VNet route mismatches between APP DB, ASIC DB, and SDK.")
+    parser.add_argument("-a", "--all", action="store_true",
+                        help="Find routes missed in ASIC DB by checking both active and inactive routes in APP DB.")
+    args = parser.parse_args()
 
     rc = RC_OK
 
-    # Don't run VNET routes consistancy logic if there is no VNET configuration
+    # Don't run VNET routes consistency logic if there is no VNET configuration
     if not check_vnet_cfg():
         return rc
     asic_db = swsscommon.DBConnector('ASIC_DB', 0, True)
     virtual_router = swsscommon.Table(asic_db, 'ASIC_STATE:SAI_OBJECT_TYPE_VIRTUAL_ROUTER')
-    if virtual_router.getKeys() != []:
-        global default_vrf_oid
-        default_vrf_oid = virtual_router.getKeys()[0]
+    global default_vrf_oid
+    default_vrf_oid = ""
+    vr_keys = virtual_router.getKeys()
+    if vr_keys:
+        default_vrf_oid = vr_keys[0]
 
     app_db_vnet_routes = get_vnet_routes_from_app_db()
+    active_app_db_vnet_routes = filter_active_vnet_routes(app_db_vnet_routes)
     asic_db_vnet_routes = get_vnet_routes_from_asic_db()
 
-    missed_in_asic_db_routes = get_vnet_routes_diff(asic_db_vnet_routes, app_db_vnet_routes,True)
+    if args.all:
+        missed_in_asic_db_routes = get_vnet_routes_diff(asic_db_vnet_routes, app_db_vnet_routes, True)
+    else:
+        missed_in_asic_db_routes = get_vnet_routes_diff(asic_db_vnet_routes, active_app_db_vnet_routes, True)
     missed_in_app_db_routes = get_vnet_routes_diff(app_db_vnet_routes, asic_db_vnet_routes)
     missed_in_sdk_routes = get_sdk_vnet_routes_diff(asic_db_vnet_routes)
 

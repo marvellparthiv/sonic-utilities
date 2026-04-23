@@ -16,9 +16,9 @@ dropstat_masic_result_asic0 = """\
 Ethernet-BP0        U         0        1000         0           0        800        100
 Ethernet-BP4        U         0        1000         0           0        800        100
 
-          DEVICE    DEBUG_1
-----------------  ---------
-sonic_drops_test       1000
+          DEVICE    SWITCH_DROPS
+----------------  --------------
+sonic_drops_test            1000
 """
 
 dropstat_masic_result_asic1 = """\
@@ -40,9 +40,9 @@ dropstat_masic_result_clear_all = """\
 Ethernet-BP0        U         0           0         0           0          0          0
 Ethernet-BP4        U         0           0         0           0          0          0
 
-          DEVICE    DEBUG_1
-----------------  ---------
-sonic_drops_test          0
+          DEVICE    SWITCH_DROPS
+----------------  --------------
+sonic_drops_test               0
          IFACE    STATE    RX_ERR    RX_DROPS    TX_ERR    TX_DROPS    DEBUG_0    DEBUG_2
 --------------  -------  --------  ----------  --------  ----------  ---------  ---------
 Ethernet-BP256        U         0           0         0           0          0          0
@@ -104,7 +104,7 @@ class TestMultiAsicDropstat(object):
         print("return_code: {}".format(return_code))
         print("result = {}".format(result))
         assert return_code == 2
-        assert "invalid choice: asic5" in result
+        assert "'asic5' is not one of" in result
 
     def test_show_dropcount_version(self):
         return_code, result = get_result_and_return_code([

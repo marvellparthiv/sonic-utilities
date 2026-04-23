@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 from .mock_tables import dbconnector
 
 import pytest
+import sfputil.debug as sfputil_debug
 from click.testing import CliRunner
 from utilities_common.db import Db
 
@@ -37,8 +38,7 @@ FLAT_MEMORY_MODULE_EEPROM_SFP_INFO_DICT = {
     'cable_length': '3',
     'application_advertisement': 'N/A',
     'specification_compliance': "{'10/40G Ethernet Compliance Code': '40GBASE-CR4'}",
-    'dom_capability': "{'Tx_power_support': 'no', 'Rx_power_support': 'no',\
-                        'Voltage_support': 'no', 'Temp_support': 'no'}",
+    'dom_capability': "N/A",
     'nominal_bit_rate': '255'
 }
 FLAT_MEMORY_MODULE_EEPROM = """Ethernet16: SFP EEPROM detected
@@ -58,6 +58,15 @@ FLAT_MEMORY_MODULE_EEPROM = """Ethernet16: SFP EEPROM detected
         Vendor PN: MCP1600-C003
         Vendor Rev: A2
         Vendor SN: MT1636VS10561
+        dom_capability: N/A
+        type_abbrv_name: QSFP28
+"""
+EMPTY_DOM_VALUES = """        ChannelMonitorValues:
+        ChannelThresholdValues:
+        ModuleMonitorValues:
+        ModuleThresholdValues:
+
+
 """
 
 class TestSfputil(object):
@@ -142,7 +151,7 @@ class TestSfputil(object):
                 'cable_length': '3',
                 'application_advertisement': 'N/A',
                 'specification_compliance': "{'10/40G Ethernet Compliance Code': '40GBASE-CR4'}",
-                'dom_capability': "{'Tx_power_support': 'no', 'Rx_power_support': 'no', 'Voltage_support': 'no', 'Temp_support': 'no'}",
+                'dom_capability': "N/A",
                 'nominal_bit_rate': '255'
             },
             # expected_output
@@ -162,6 +171,8 @@ class TestSfputil(object):
             "        Vendor PN: MCP1600-C003\n"
             "        Vendor Rev: A2\n"
             "        Vendor SN: MT1636VS10561\n"
+            "        dom_capability: N/A\n"
+            "        type_abbrv_name: QSFP28\n"
         ),
         # CMIS compliant module
         (
@@ -189,15 +200,11 @@ class TestSfputil(object):
                                                   'media_lane_assignment_options': 2}, \
                                               2: {'host_electrical_interface_id': '200GBASE-CR4 (Clause 136)'}}",
                 'specification_compliance': "sm_media_interface",
-                'dom_capability': "{'Tx_power_support': 'no', 'Rx_power_support': 'no', 'Voltage_support': 'no', 'Temp_support': 'no'}",
+                'dom_capability': "N/A",
                 'nominal_bit_rate': '0',
                 'hardware_rev': '0.0',
-                'media_interface_code': '400ZR, DWDM, amplified',
-                'host_electrical_interface': '400GAUI-8 C2M (Annex 120E)',
                 'host_lane_count': 8,
                 'media_lane_count': 1,
-                'host_lane_assignment_option': 1,
-                'media_lane_assignment_option': 1,
                 'active_apsel_hostlane1': 1,
                 'active_apsel_hostlane2': 1,
                 'active_apsel_hostlane3': 1,
@@ -230,14 +237,10 @@ class TestSfputil(object):
             "        Extended Identifier: Power Class 8 (18.0W Max)\n"
             "        Extended RateSelect Compliance: N/A\n"
             "        Hardware Revision: 0.0\n"
-            "        Host Electrical Interface: 400GAUI-8 C2M (Annex 120E)\n"
-            "        Host Lane Assignment Options: 1\n"
             "        Host Lane Count: 8\n"
             "        Identifier: QSFP-DD Double Density 8X Pluggable Transceiver\n"
             "        Length Cable Assembly(m): 0\n"
-            "        Media Interface Code: 400ZR, DWDM, amplified\n"
             "        Media Interface Technology: C-band tunable laser\n"
-            "        Media Lane Assignment Options: 1\n"
             "        Media Lane Count: 1\n"
             "        Nominal Bit Rate(100Mbs): 0\n"
             "        Specification compliance: sm_media_interface\n"
@@ -251,15 +254,18 @@ class TestSfputil(object):
             "        Vendor PN: def\n"
             "        Vendor Rev: ghi\n"
             "        Vendor SN: jkl\n"
+            "        dom_capability: N/A\n"
+            "        type_abbrv_name: QSFP-DD\n"
         ),
     ])
     def test_convert_sfp_info_to_output_string(self, sfp_info_dict, expected_output):
         output = sfputil.convert_sfp_info_to_output_string(sfp_info_dict)
         assert output == expected_output
 
-    @pytest.mark.parametrize("sfp_type, dom_info_dict, expected_output", [
+    @pytest.mark.parametrize("sfp_type, is_sfp_cmis, dom_info_dict, expected_output", [
         (
             'QSFP28 or later',
+            False,
             {
                 'temperature': '41.7539C',
                 'voltage': '3.2577Volts',
@@ -292,9 +298,10 @@ class TestSfputil(object):
                 Vcc: 3.2577Volts
         ModuleThresholdValues:
 '''
-        ), 
+        ),
         (
             'QSFP-DD Double Density 8X Pluggable Transceiver',
+            True,
             {
                 'temperature': '41.7539C',
                 'voltage': '3.2577Volts',
@@ -350,6 +357,7 @@ class TestSfputil(object):
         ),
         (
             'OSFP 8X Pluggable Transceiver',
+            True,
             {
                 'temperature': '41.7539C',
                 'voltage': '3.2577Volts',
@@ -403,8 +411,8 @@ class TestSfputil(object):
         ModuleThresholdValues:
 '''
         )])
-    def test_convert_dom_to_output_string(self, sfp_type, dom_info_dict, expected_output):
-        output = sfputil.convert_dom_to_output_string(sfp_type, dom_info_dict)
+    def test_convert_dom_to_output_string(self, sfp_type, is_sfp_cmis, dom_info_dict, expected_output):
+        output = sfputil.convert_dom_to_output_string(sfp_type, is_sfp_cmis, dom_info_dict)
         assert output == expected_output
 
     def test_get_physical_port_name(self):
@@ -580,6 +588,7 @@ Ethernet44  OK
         mock_api = MagicMock()
         mock_sfp.get_xcvr_api = MagicMock(return_value=mock_api)
         mock_sfp.get_lpmode.return_value = True
+        mock_sfp.get_presence = MagicMock(return_value=True)
         mock_chassis.get_sfp = MagicMock(return_value=mock_sfp)
         runner = CliRunner()
         result = runner.invoke(sfputil.cli.commands['show'].commands['lpmode'], ["-p", "Ethernet0"])
@@ -599,6 +608,16 @@ Ethernet0  Off
 """
         assert result.output == expected_output
 
+        mock_sfp.get_presence.return_value = False
+        result = runner.invoke(sfputil.cli.commands['show'].commands['lpmode'], ["-p", "Ethernet0"])
+        assert result.exit_code == 0
+        expected_output = """Port       Low-power Mode
+---------  ----------------
+Ethernet0  Not Present
+"""
+        assert result.output == expected_output
+
+        mock_sfp.get_presence.return_value = True
         mock_sfp.get_lpmode.return_value = False
         mock_sfp.get_transceiver_info = MagicMock(return_value={'type': sfputil.RJ45_PORT_TYPE})
         mock_chassis.get_port_or_cage_type = MagicMock(return_value=sfputil.SfpBase.SFP_PORT_TYPE_BIT_RJ45)
@@ -675,7 +694,7 @@ Ethernet0  N/A
     @patch('sfputil.main.platform_sfputil', MagicMock(is_logical_port=MagicMock(return_value=1)))
     @patch('sfputil.main.is_port_type_rj45', MagicMock(return_value=False))
     @pytest.mark.parametrize("exception, xcvr_api_none, expected_output", [
-        (None, False, '''DOM values not supported for flat memory module\n\n'''),
+        (None, False, EMPTY_DOM_VALUES),
         (NotImplementedError, False, '''API is currently not implemented for this platform\n\n'''),
         (None, True, '''API is none while getting DOM info!\n\n''')
     ])
@@ -702,6 +721,29 @@ Ethernet0  N/A
         else:
             assert result.exit_code == 0
         assert result.output == FLAT_MEMORY_MODULE_EEPROM + expected_output
+
+    @patch('sfputil.main.logical_port_to_physical_port_index', MagicMock(return_value=1))
+    @patch('sfputil.main.logical_port_name_to_physical_port_list', MagicMock(return_value=[1]))
+    @patch('sfputil.main.platform_sfputil', MagicMock(is_logical_port=MagicMock(return_value=1)))
+    @patch('sfputil.main.is_port_type_rj45', MagicMock(return_value=False))
+    @patch('sfputil.main.platform_chassis')
+    def test_show_eeprom_dom_real_value_exception(self, mock_chassis):
+        mock_sfp = MagicMock()
+        mock_sfp.get_presence.return_value = True
+        mock_sfp.get_transceiver_info.return_value = MagicMock()
+        mock_sfp.get_transceiver_dom_real_value = MagicMock(side_effect=NotImplementedError)
+        mock_chassis.get_sfp.return_value = mock_sfp
+
+        mock_api = MagicMock()
+        mock_api.is_flat_memory = MagicMock(return_value=False)
+        mock_api.get_dom = MagicMock(side_effect=NotImplementedError)
+        mock_chassis.get_sfp().get_xcvr_api.return_value = mock_api
+
+        runner = CliRunner()
+        result = runner.invoke(sfputil.cli.commands['show'].commands['eeprom'], ["-p", "Ethernet16", "-d"])
+
+        assert result.output == "Sfp.get_transceiver_dom_real_value() is currently not implemented for this platform\n"
+        assert result.exit_code == ERROR_NOT_IMPLEMENTED
 
     @patch('sfputil.main.platform_chassis')
     @patch('sfputil.main.platform_sfputil', MagicMock(is_logical_port=MagicMock(return_value=0)))
@@ -1002,15 +1044,11 @@ Ethernet0  N/A
 
         runner = CliRunner()
         result = runner.invoke(sfputil.cli.commands['show'].commands['eeprom-hexdump'])
+        # With continue-on-failure behavior: exit 0 and failed pages are reported, not abort
         assert result.exit_code == 0
-        expected_output = """EEPROM hexdump for port Ethernet0
-        Error: Failed to read EEPROM for page 0h, flat_offset 0, page_offset 0, size 128!
-
-EEPROM hexdump for port Ethernet4
-        Error: Failed to read EEPROM for A0h!
-
-"""
-        assert result.output == expected_output
+        assert "EEPROM hexdump for port Ethernet0" in result.output
+        assert "EEPROM hexdump for port Ethernet4" in result.output
+        assert "Error: Failed to read EEPROM" in result.output
 
     @patch('sfputil.main.platform_chassis')
     @patch('sfputil.main.platform_sfputil')
@@ -1128,22 +1166,96 @@ EEPROM hexdump for port Ethernet4
         sfputil.eeprom_hexdump_single_port('Ethernet0', 3)
         mock_dump.assert_called_with('Ethernet0', [0, 3], 3)
 
+    @patch('sfputil.main.logical_port_to_physical_port_index', MagicMock(return_value=0))
+    @patch('sfputil.main.eeprom_dump_general')
+    def test_eeprom_hexdump_pages_general_continues_on_single_page_failure(self, mock_eeprom_dump_general):
+        """When one page read fails, dump continues and returns 0 with failure line in output."""
+        # Call 1: Lower page 0h success, Call 2: Upper page 0h fail, Call 3: Upper page 1h success
+        mock_eeprom_dump_general.side_effect = [
+            (0, "        00000000 00 01 02 03 ..."),
+            (1, "read error"),
+            (0, "        00000080 10 11 12 13 ..."),
+        ]
+        rc, output = sfputil.eeprom_hexdump_pages_general("Ethernet0", [0, 1], None)
+        assert rc == 0
+        assert "Lower page 0h" in output
+        assert "00000000 00 01 02 03" in output
+        assert "read error" in output
+        assert "Upper page 1h" in output
+        assert "00000080 10 11 12 13" in output
 
+    @patch('sfputil.main.platform_chassis')
+    @patch('sfputil.main.logical_port_to_physical_port_index', MagicMock(return_value=0))
+    @patch('sfputil.main.eeprom_dump_general')
+    def test_eeprom_hexdump_pages_sff8472_continues_on_single_page_failure(
+            self, mock_eeprom_dump_general, mock_chassis):
+        """When one SFF8472 page (e.g. A2h lower) fails, dump continues and returns 0."""
+        mock_api = MagicMock()
+        mock_api.is_flat_memory.return_value = False
+        mock_chassis.get_sfp.return_value.get_xcvr_api.return_value = mock_api
+        # A0h success, A2h lower fail, A2h upper success
+        mock_eeprom_dump_general.side_effect = [
+            (0, "        00000000 03 04 07 ..."),
+            (1, "A2h lower read error"),
+            (0, "        00000100 00 00 00 ..."),
+        ]
+        rc, output = sfputil.eeprom_hexdump_pages_sff8472("Ethernet0", [0, 1, 2], None)
+        assert rc == 0
+        assert "A0h dump" in output
+        assert "00000000 03 04 07" in output
+        assert "A2h lower read error" in output
+        assert "A2h dump (upper 128 bytes) page 0h" in output
+        assert "00000100 00 00 00" in output
 
-    @patch('sfputil.main.logical_port_name_to_physical_port_list', MagicMock(return_value=1))
-    @patch('sfputil.main.is_port_type_rj45', MagicMock(return_value=True))
+    @patch('sfputil.main.logical_port_name_to_physical_port_list', MagicMock(return_value=[1]))
+    @patch('sfputil.main.platform_chassis')
+    @patch('sfputil.main.is_port_type_rj45')
     @patch('sfputil.main.platform_sfputil', MagicMock(is_logical_port=MagicMock(return_value=1)))
-    def test_lpmode_set(self):
+    def test_lpmode_set(self, mock_is_rj45, mock_chassis):
         runner = CliRunner()
+        mock_is_rj45.return_value = False
+        mock_sfp = MagicMock()
+        mock_api = MagicMock()
+        mock_sfp.get_xcvr_api = MagicMock(return_value=mock_api)
+        mock_sfp.get_presence.return_value = True
+        mock_chassis.get_sfp = MagicMock(return_value=mock_sfp)
+        result = runner.invoke(sfputil.cli.commands['lpmode'].commands['on'], ["Ethernet0"])
+        assert result.exit_code == 0
+        assert result.output == "Enabling low-power mode for port Ethernet0 ... OK\n"
+
+        mock_sfp.get_presence.return_value = False
+        result = runner.invoke(sfputil.cli.commands['lpmode'].commands['on'], ["Ethernet0"])
+        assert result.exit_code == 0
+        assert result.output == "Ethernet0: module 1 is not present, skipping\n"
+
+        mock_is_rj45.return_value = True
         result = runner.invoke(sfputil.cli.commands['lpmode'].commands['on'], ["Ethernet0"])
         assert result.output == 'Enabling low-power mode is not applicable for RJ45 port Ethernet0.\n'
         assert result.exit_code == EXIT_FAIL
 
-    @patch('sfputil.main.logical_port_name_to_physical_port_list', MagicMock(return_value=1))
-    @patch('sfputil.main.is_port_type_rj45', MagicMock(return_value=True))
+    @patch('sfputil.main.logical_port_name_to_physical_port_list', MagicMock(return_value=[1]))
+    @patch('sfputil.main.platform_chassis')
+    @patch('sfputil.main.is_port_type_rj45')
     @patch('sfputil.main.platform_sfputil', MagicMock(is_logical_port=MagicMock(return_value=1)))
-    def test_reset_RJ45(self):
+    def test_reset_RJ45(self, mock_is_rj45, mock_chassis):
+        mock_is_rj45.return_value = False
+        mock_sfp = MagicMock()
+        mock_api = MagicMock()
+        mock_sfp.get_xcvr_api = MagicMock(return_value=mock_api)
+        mock_sfp.get_presence = MagicMock(return_value=True)
+        mock_sfp.reset = MagicMock(return_value=True)
+        mock_chassis.get_sfp = MagicMock(return_value=mock_sfp)
         runner = CliRunner()
+        result = runner.invoke(sfputil.cli.commands['reset'], ["Ethernet0"])
+        assert result.exit_code == 0
+        assert result.output == "Resetting port Ethernet0 ... OK\n"
+
+        mock_sfp.get_presence.return_value = False
+        result = runner.invoke(sfputil.cli.commands['reset'], ["Ethernet0"])
+        assert result.exit_code == 0
+        assert result.output == "Ethernet0: module 1 is not present, skipping\n"
+
+        mock_is_rj45.return_value = True
         result = runner.invoke(sfputil.cli.commands['reset'], ["Ethernet0"])
         assert result.output == 'Reset is not applicable for RJ45 port Ethernet0.\n'
         assert result.exit_code == EXIT_FAIL
@@ -1310,16 +1422,100 @@ EEPROM hexdump for port Ethernet4
         result = runner.invoke(sfputil.cli.commands['firmware'].commands['commit'], ["Ethernet0"])
         assert result.exit_code == 0
 
-    @patch('sfputil.main.logical_port_to_physical_port_index', MagicMock(return_value=1))
-    @patch('sonic_py_common.multi_asic.get_front_end_namespaces', MagicMock(return_value=['']))
-    @patch('sfputil.main.SonicV2Connector', MagicMock())
+    @pytest.mark.parametrize(
+        "port_name, first_subport, physical_port, namespaces, transceiver_info, expected_calls, expected_logs",
+        [
+            # Case 1: Valid port with firmware info
+            (
+                "Ethernet0",
+                "Ethernet0",
+                1,
+                [""],
+                {"active_firmware": "1.0.0", "inactive_firmware": "0.9.0"},
+                [
+                    ("TRANSCEIVER_FIRMWARE_INFO|Ethernet0", "active_firmware", "1.0.0"),
+                    ("TRANSCEIVER_FIRMWARE_INFO|Ethernet0", "inactive_firmware", "0.9.0"),
+                ],
+                [],
+            ),
+            # Case 2: Missing subport
+            (
+                "Ethernet1",
+                None,
+                None,
+                [],
+                None,
+                [],
+                ["Error: Unable to get first subport for Ethernet1 while updating FW info to DB"],
+            ),
+            # Case 3: Exception during firmware info retrieval
+            (
+                "Ethernet2",
+                "Ethernet2",
+                2,
+                [""],
+                None,
+                [],
+                [],
+            ),
+        ],
+    )
+    @patch("sfputil.main.get_first_subport")
+    @patch("sfputil.main.logical_port_to_physical_port_index")
+    @patch("sfputil.main.multi_asic.get_front_end_namespaces")
     @patch('sfputil.main.platform_chassis')
-    def test_update_firmware_info_to_state_db(self, mock_chassis):
+    @patch("sfputil.main.SonicV2Connector")
+    def test_update_firmware_info_to_state_db(
+        self,
+        mock_sonic_v2_connector,
+        mock_chassis,
+        mock_get_front_end_namespaces,
+        mock_logical_port_to_physical_port_index,
+        mock_get_first_subport,
+        port_name,
+        first_subport,
+        physical_port,
+        namespaces,
+        transceiver_info,
+        expected_calls,
+        expected_logs,
+        capsys,
+    ):
+        # Mock get_first_subport
+        mock_get_first_subport.return_value = first_subport
+
+        # Mock logical_port_to_physical_port_index
+        mock_logical_port_to_physical_port_index.return_value = physical_port
+
+        # Mock multi_asic.get_front_end_namespaces
+        mock_get_front_end_namespaces.return_value = namespaces
+
+        # Mock platform_chassis.get_sfp
         mock_sfp = MagicMock()
         mock_chassis.get_sfp = MagicMock(return_value=mock_sfp)
-        mock_sfp.get_transceiver_info_firmware_versions.return_value = {'active_firmware' : 'a.b.c', 'inactive_firmware' : 'd.e.f'}
+        mock_sfp.get_transceiver_info_firmware_versions = MagicMock(return_value=transceiver_info)
 
-        sfputil.update_firmware_info_to_state_db("Ethernet0")
+        # Mock SonicV2Connector
+        mock_state_db = MagicMock()
+        mock_state_db.STATE_DB = "STATE_DB"
+        mock_state_db.connect = MagicMock()
+        mock_sonic_v2_connector.return_value = mock_state_db
+
+        # Call the function
+        sfputil.update_firmware_info_to_state_db(port_name)
+
+        # Verify logs
+        captured = capsys.readouterr()
+        for log in expected_logs:
+            assert log in captured.out
+
+        # Verify database updates
+        if first_subport or transceiver_info:
+            mock_state_db.connect.assert_called_once_with(mock_state_db.STATE_DB)
+            for call in expected_calls:
+                mock_state_db.set.assert_any_call(mock_state_db.STATE_DB, *call)
+        else:
+            mock_state_db.connect.assert_not_called()
 
     @patch('sfputil.main.is_port_type_rj45', MagicMock(return_value=False))
     @patch('sfputil.main.logical_port_to_physical_port_index', MagicMock(return_value=1))
@@ -1469,40 +1665,40 @@ EEPROM hexdump for port Ethernet4
 
         mock_sfp.get_presence = MagicMock(return_value=True)
         mock_sfp.get_xcvr_api = MagicMock(return_value=api)
-        
+
         runner = CliRunner()
         result = runner.invoke(sfputil.cli.commands['write-eeprom'],
                                ['-p', "Ethernet0", '-n', '-1', '-o', '0', '-d', '01'])
         assert result.exit_code != 0
-        
+
         result = runner.invoke(sfputil.cli.commands['write-eeprom'],
                                ['-p', "Ethernet0", '-n', '256', '-o', '0', '-d', '01'])
         assert result.exit_code != 0
-        
+
         result = runner.invoke(sfputil.cli.commands['write-eeprom'],
                                ['-p', "Ethernet0", '-n', '0', '-o', '-1', '-d', '01'])
         assert result.exit_code != 0
-        
+
         result = runner.invoke(sfputil.cli.commands['write-eeprom'],
                                ['-p', "Ethernet0", '-n', '0', '-o', '256', '-d', '01'])
         assert result.exit_code != 0
-        
+
         result = runner.invoke(sfputil.cli.commands['write-eeprom'],
                                ['-p', "Ethernet0", '-n', '1', '-o', '127', '-d', '01'])
         assert result.exit_code != 0
-        
+
         result = runner.invoke(sfputil.cli.commands['write-eeprom'],
                                ['-p', "Ethernet0", '-n', '1', '-o', '256', '-d', '01'])
         assert result.exit_code != 0
-        
+
         result = runner.invoke(sfputil.cli.commands['read-eeprom'],
                                ['-p', "Ethernet0", '-n', '0', '-o', '0', '-s', '0'])
         assert result.exit_code != 0
-        
+
         result = runner.invoke(sfputil.cli.commands['read-eeprom'],
                                ['-p', "Ethernet0", '-n', '0', '-o', '0', '-s', '257'])
         assert result.exit_code != 0
-        
+
         result = runner.invoke(sfputil.cli.commands['write-eeprom'],
                                ['-p', "Ethernet0", '-n', '0', '-o', '1', '-d', '01'])
         assert result.exit_code == 0
@@ -1520,13 +1716,13 @@ EEPROM hexdump for port Ethernet4
 
         mock_sfp.get_presence = MagicMock(return_value=True)
         mock_sfp.get_xcvr_api = MagicMock(return_value=api)
-        
+
         runner = CliRunner()
         result = runner.invoke(sfputil.cli.commands['read-eeprom'],
                                ['-p', "Ethernet0", '-n', '0', '-o', '0', '-s', '1'])
         assert result.exit_code != 0
         print(result.output)
-        
+
         result = runner.invoke(sfputil.cli.commands['read-eeprom'],
                                ['-p', "Ethernet0", '--wire-addr', 'invalid', '-n', '0', '-o', '0', '-s', '1'])
         assert result.exit_code != 0
@@ -1541,49 +1737,49 @@ EEPROM hexdump for port Ethernet4
                                ['-p', "Ethernet0", '--wire-addr', 'A0h', '-n', '0', '-o', '-1', '-s', '1'])
         assert result.exit_code != 0
         print(result.output)
-        
+
         result = runner.invoke(sfputil.cli.commands['read-eeprom'],
                                ['-p', "Ethernet0", '--wire-addr', 'A0h', '-n', '0', '-o', '256', '-s', '1'])
         assert result.exit_code != 0
         print(result.output)
 
-        result = runner.invoke(sfputil.cli.commands['read-eeprom'], 
+        result = runner.invoke(sfputil.cli.commands['read-eeprom'],
                                ['-p', "Ethernet0", '--wire-addr', 'A0h', '-n', '0', '-o', '0', '-s', '0'])
         assert result.exit_code != 0
         print(result.output)
-        
+
         result = runner.invoke(sfputil.cli.commands['read-eeprom'],
                                ['-p', "Ethernet0", '--wire-addr', 'A0h', '-n', '0', '-o', '0', '-s', '257'])
         assert result.exit_code != 0
         print(result.output)
-        
+
         assert sfputil.get_overall_offset_sff8472(api, 0, 2, 2, wire_addr='A0h') == 2
-        
+
         result = runner.invoke(sfputil.cli.commands['read-eeprom'],
                                ['-p', "Ethernet0", '--wire-addr', 'a2h', '-n', '-1', '-o', '0', '-s', '1'])
         assert result.exit_code != 0
         print(result.output)
-        
+
         result = runner.invoke(sfputil.cli.commands['read-eeprom'],
                                ['-p', "Ethernet0", '--wire-addr', 'a2h', '-n', '256', '-o', '0', '-s', '1'])
         assert result.exit_code != 0
         print(result.output)
-        
+
         result = runner.invoke(sfputil.cli.commands['read-eeprom'],
                                ['-p', "Ethernet0", '--wire-addr', 'a2h', '-n', '0', '-o', '-1', '-s', '1'])
         assert result.exit_code != 0
         print(result.output)
-        
+
         result = runner.invoke(sfputil.cli.commands['read-eeprom'],
                                ['-p', "Ethernet0", '--wire-addr', 'a2h', '-n', '0', '-o', '0', '-s', '0'])
         assert result.exit_code != 0
         print(result.output)
-        
+
         result = runner.invoke(sfputil.cli.commands['read-eeprom'],
                                ['-p', "Ethernet0", '--wire-addr', 'a2h', '-n', '0', '-o', '0', '-s', '257'])
         assert result.exit_code != 0
         print(result.output)
-        
+
         assert sfputil.get_overall_offset_sff8472(api, 0, 2, 2, wire_addr='A2h') == 258
 
     @patch('sfputil.main.platform_chassis')
@@ -1629,27 +1825,30 @@ EEPROM hexdump for port Ethernet4
         mock_is_multi_asic.return_value = False
         assert sfputil.load_port_config() == True
 
-    @patch('sfputil.main.is_port_type_rj45', MagicMock(return_value=False))
-    @patch('sfputil.main.platform_chassis')
-    @patch('sfputil.main.ConfigDBConnector')
-    @patch('sfputil.main.SonicV2Connector')
-    @patch('sfputil.main.platform_sfputil', MagicMock(is_logical_port=MagicMock(return_value=1)))
-    @patch('sfputil.main.logical_port_to_physical_port_index', MagicMock(return_value=1))
+    @patch('utilities_common.platform_sfputil_helper.is_rj45_port', MagicMock(return_value=False))
+    @patch('sfputil.debug.get_sfp_object')
+    @patch('utilities_common.platform_sfputil_helper.is_sfp_present')
+    @patch('utilities_common.platform_sfputil_helper.ConfigDBConnector')
+    @patch('utilities_common.platform_sfputil_helper.SonicV2Connector')
     @patch('sonic_py_common.multi_asic.get_front_end_namespaces', MagicMock(return_value=['']))
-    def test_debug_loopback(self, mock_sonic_v2_connector, mock_config_db_connector, mock_chassis):
+    def test_debug_loopback(self, mock_sonic_v2_connector, mock_config_db_connector, sfp_presence, mock_get_sfp_object):
         mock_sfp = MagicMock()
         mock_api = MagicMock()
         mock_config_db_connector.return_value = MagicMock()
         mock_sonic_v2_connector.return_value = MagicMock()
-        mock_chassis.get_sfp = MagicMock(return_value=mock_sfp)
         mock_sfp.get_presence.return_value = True
         mock_sfp.get_xcvr_api = MagicMock(return_value=mock_api)
+        sfp_presence.return_value = False
+        mock_get_sfp_object.return_value = mock_sfp  # Ensure get_sfp_object returns the mock
 
         runner = CliRunner()
         mock_sfp.get_presence.return_value = False
+        """
         result = runner.invoke(sfputil.cli.commands['debug'].commands['loopback'],
                                ["Ethernet0", "host-side-input", "enable"])
         assert result.output == 'Ethernet0: SFP EEPROM not detected\n'
+        """
+        sfp_presence.return_value = True
         mock_sfp.get_presence.return_value = True
 
         mock_sfp.get_xcvr_api = MagicMock(side_effect=NotImplementedError)
@@ -1659,6 +1858,13 @@ EEPROM hexdump for port Ethernet4
         assert result.exit_code == ERROR_NOT_IMPLEMENTED
 
         mock_sfp.get_xcvr_api = MagicMock(return_value=mock_api)
+        mock_config_db = MagicMock()
+        mock_config_db.get.return_value = 1
+        mock_config_db_connector.return_value = mock_config_db
+        mock_state_db = MagicMock()
+        mock_state_db.get.return_value = 1
+        mock_sonic_v2_connector.return_value = mock_state_db
+        mock_api.get_diag_page_support.return_value = True
         result = runner.invoke(sfputil.cli.commands['debug'].commands['loopback'],
                                ["Ethernet0", "host-side-input", "enable"])
         assert result.output == 'Ethernet0: enable host-side-input loopback\n'
@@ -1670,6 +1876,15 @@ EEPROM hexdump for port Ethernet4
         assert result.output == 'Ethernet0: enable media-side-input loopback\n'
         assert result.exit_code != ERROR_NOT_IMPLEMENTED
 
+        mock_api.get_diag_page_support.return_value = False
+        result = runner.invoke(sfputil.cli.commands['debug'].commands['loopback'],
+                               ["Ethernet0", "media-side-output", "enable"])
+        assert result.output == (
+            'Ethernet0: The module does not support diagnostic pages required for loopback configuration\n'
+            'Ethernet0: enable media-side-output loopback failed\n')
+        assert result.exit_code == EXIT_FAIL
+
+        mock_api.get_diag_page_support.return_value = True
         mock_api.set_loopback_mode.return_value = False
         result = runner.invoke(sfputil.cli.commands['debug'].commands['loopback'],
                                ["Ethernet0", "media-side-output", "enable"])
@@ -1694,23 +1909,105 @@ EEPROM hexdump for port Ethernet4
         mock_config_db_connector.return_value = mock_config_db
         result = runner.invoke(sfputil.cli.commands['debug'].commands['loopback'],
                                ["Ethernet0", "media-side-input", "enable"])
-        assert result.output == 'Ethernet0: subport is not present in CONFIG_DB\n'
+        assert result.output == 'Error: \nEthernet0: subport is not present in CONFIG_DB\n'
         assert result.exit_code == EXIT_FAIL
 
-        mock_config_db_connector.return_value = None
-        result = runner.invoke(sfputil.cli.commands['debug'].commands['loopback'],
-                               ["Ethernet0", "media-side-input", "enable"])
-        assert result.output == 'Ethernet0: Failed to connect to CONFIG_DB\n'
-        assert result.exit_code == EXIT_FAIL
 
-        mock_config_db_connector.return_value = MagicMock()
         mock_sonic_v2_connector.return_value = None
         result = runner.invoke(sfputil.cli.commands['debug'].commands['loopback'],
                                ["Ethernet0", "media-side-input", "enable"])
-        assert result.output == 'Ethernet0: Failed to connect to STATE_DB\n'
+        assert result.output == 'Error: \nEthernet0: subport is not present in CONFIG_DB\n'
         assert result.exit_code == EXIT_FAIL
 
+    @pytest.mark.parametrize(
+        "direction, lane_count, enable, disable_func_result, cmis_version, output_dict, expected_echo, expected_exit",
+        [
+            # TX disable success
+            (
+                "tx", 2, "disable", True, "5.3", {"TxOutputStatus1": False, "TxOutputStatus2": False},
+                "TX output disabled", None
+            ),
+            # RX enable success
+            ("rx", 1, "enable", True, "5.0", {"RxOutputStatus1": True}, "RX output enabled", None),
+            # TX disable fails to disable
+            (
+                "tx", 1, "disable", True, "5.0", {"TxOutputStatus1": True},
+                "TX output on lane 1 is still enabled", SystemExit
+            ),
+            # RX enable fails to enable
+            (
+                "rx", 1, "enable", True, "5.0", {"RxOutputStatus1": False},
+                "RX output on lane 1 is still disabled", SystemExit
+            ),
+            # CMIS version is None
+            ("tx", 1, "disable", False, None, {}, "CMIS revision not available", SystemExit),
+            # CMIS version is below 5.0
+            ("rx", 1, "disable", True, "4.0", None, "This functionality is not supported", SystemExit),
+        ]
+    )
+    @patch("sfputil.debug.get_sfp_object")
+    @patch("sfputil.debug.get_subport")
+    @patch("sfputil.debug.get_media_lane_count")
+    @patch("sfputil.debug.get_host_lane_count")
+    @patch("sfputil.debug.time.sleep", return_value=None)
+    def test_set_output_cli(
+        self,
+        mock_sleep,
+        mock_get_host_lane_count,
+        mock_get_media_lane_count,
+        mock_get_subport,
+        mock_get_sfp_object,
+        direction,
+        lane_count,
+        enable,
+        disable_func_result,
+        cmis_version,
+        output_dict,
+        expected_echo,
+        expected_exit
+    ):
+        from click.testing import CliRunner
+        import sfputil.main as sfputil
+
+        port_name = "Ethernet0"
+        subport = 1
+        runner = CliRunner()
+
+        mock_get_subport.return_value = subport
+        mock_get_media_lane_count.return_value = lane_count
+        mock_get_host_lane_count.return_value = lane_count
+
+        # Mock SFP and API
+        mock_sfp = MagicMock()
+        mock_api = MagicMock()
+        mock_api.get_cmis_rev.return_value = cmis_version
+        if direction == "tx":
+            mock_sfp.tx_disable_channel.return_value = disable_func_result
+            mock_api.get_tx_output_status.return_value = output_dict
+        elif direction == "rx":
+            mock_sfp.rx_disable_channel.return_value = disable_func_result
+            mock_api.get_rx_output_status.return_value = output_dict
+        mock_sfp.get_xcvr_api.return_value = mock_api
+        mock_get_sfp_object.return_value = mock_sfp
+
+        # Map direction to CLI command
+        direction_to_cli = {"tx": "tx-output", "rx": "rx-output"}
+        cli_cmd = direction_to_cli.get(direction, direction)
+
+        # Run CLI and check output/exit
+        result = runner.invoke(sfputil.cli.commands['debug'].commands.get(cli_cmd, lambda *a, **k: None),
+                               [port_name, enable])
+
+        if expected_exit:
+            assert result.exit_code != 0
+            assert expected_echo in result.output
+        else:
+            assert result.exit_code == 0
+            assert expected_echo in result.output
+
     @pytest.mark.parametrize("subport, lane_count, expected_mask", [
+        (0, 2, 0x3),
+        (0, 4, 0xf),
         (1, 1, 0x1),
         (1, 4, 0xf),
         (2, 1, 0x2),
@@ -1719,4 +2016,4 @@ EEPROM hexdump for port Ethernet4
         (4, 1, 0x8),
     ])
     def test_get_subport_lane_mask(self, subport, lane_count, expected_mask):
-        assert sfputil.get_subport_lane_mask(subport, lane_count) == expected_mask
+        assert sfputil_debug.get_subport_lane_mask(subport, lane_count) == expected_mask
